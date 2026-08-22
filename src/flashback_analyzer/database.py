@@ -5,9 +5,10 @@ import sqlite3
 from pathlib import Path
 
 from .models import ParsedPage
+from .navigation import ForumNode, ThreadSummary
 from .urls import normalize_url, thread_page_url, url_domain
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -139,6 +140,41 @@ CREATE TABLE IF NOT EXISTS reader_state (
     last_seen_post_id INTEGER,
     last_seen_at TEXT
 );
+CREATE TABLE IF NOT EXISTS forum_sections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    forum_id TEXT,
+    parent_id INTEGER REFERENCES forum_sections(id) ON DELETE CASCADE,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    is_browsable INTEGER NOT NULL DEFAULT 0,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source, url)
+);
+CREATE INDEX IF NOT EXISTS idx_forum_sections_parent ON forum_sections(parent_id, sort_order);
+CREATE TABLE IF NOT EXISTS forum_threads (
+    forum_id INTEGER NOT NULL REFERENCES forum_sections(id) ON DELETE CASCADE,
+    thread_id INTEGER NOT NULL REFERENCES threads(thread_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0,
+    is_sticky INTEGER NOT NULL DEFAULT 0,
+    author TEXT,
+    reply_count INTEGER,
+    view_count INTEGER,
+    last_post_at TEXT,
+    last_post_author TEXT,
+    page_count INTEGER,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(forum_id, thread_id)
+);
+CREATE INDEX IF NOT EXISTS idx_forum_threads_thread ON forum_threads(thread_id);
+CREATE TABLE IF NOT EXISTS navigation_cache_metadata (
+    source TEXT PRIMARY KEY,
+    cache_key TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
 """
 
 
@@ -158,6 +194,7 @@ class Database:
             "links": {"domain": "TEXT NOT NULL DEFAULT ''", "author": "TEXT", "posted_at": "TEXT"},
             "stances": {"prompt_version": "TEXT", "analysis_version": "TEXT", "input_hash": "TEXT"},
             "questions": {"method": "TEXT NOT NULL DEFAULT 'manual'", "confidence": "REAL NOT NULL DEFAULT 1.0", "input_hash": "TEXT"},
+            "forum_threads": {"author": "TEXT", "reply_count": "INTEGER", "view_count": "INTEGER", "last_post_at": "TEXT", "last_post_author": "TEXT", "page_count": "INTEGER"},
         }
         for table, columns in migrations.items():
             existing = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
@@ -292,4 +329,76 @@ class Database:
     def mark_post_seen(self, thread_id: int, post_id: int) -> None:
         self.conn.execute("""INSERT INTO reader_state(thread_id, last_seen_post_id, last_seen_at) VALUES (?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(thread_id) DO UPDATE SET last_seen_post_id=excluded.last_seen_post_id, last_seen_at=CURRENT_TIMESTAMP""", (thread_id, post_id))
+        self.conn.commit()
+
+    def store_forum_nodes(self, nodes: list[ForumNode]) -> int:
+        """Upsert a navigation tree, resolving parents by canonical URL."""
+
+        for node in nodes:
+            self.conn.execute("""INSERT INTO forum_sections
+                (source, title, url, forum_id, sort_order, is_browsable, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(source, url) DO UPDATE SET title=excluded.title,
+                forum_id=excluded.forum_id, sort_order=excluded.sort_order,
+                is_browsable=excluded.is_browsable, last_seen_at=CURRENT_TIMESTAMP""",
+                (node.source, node.title, node.url, node.external_id, node.sort_order, int(node.is_browsable)))
+        for node in nodes:
+            parent_id = None
+            if node.parent_url:
+                row = self.conn.execute("SELECT id FROM forum_sections WHERE source=? AND url=?", (node.source, node.parent_url)).fetchone()
+                parent_id = int(row[0]) if row else None
+            self.conn.execute("UPDATE forum_sections SET parent_id=? WHERE source=? AND url=?", (parent_id, node.source, node.url))
+        self.conn.commit()
+        return len(nodes)
+
+    def forum_roots(self, source: str = "flashback") -> list[sqlite3.Row]:
+        return self.conn.execute("""SELECT * FROM forum_sections
+            WHERE source=? AND parent_id IS NULL ORDER BY sort_order, title""", (source,)).fetchall()
+
+    def forum_children(self, section_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute("""SELECT * FROM forum_sections
+            WHERE parent_id=? ORDER BY sort_order, title""", (section_id,)).fetchall()
+
+    def forum_section(self, section_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM forum_sections WHERE id=?", (section_id,)).fetchone()
+
+    def store_forum_thread_summaries(self, forum_id: int, summaries: list[ThreadSummary]) -> int:
+        """Cache listing rows and create lightweight canonical thread placeholders."""
+
+        for position, summary in enumerate(summaries):
+            self.conn.execute("""INSERT INTO threads(thread_id, title, url, page_count)
+                VALUES (?, ?, ?, COALESCE(?, 1)) ON CONFLICT(thread_id) DO UPDATE SET
+                title=COALESCE(excluded.title, threads.title), url=COALESCE(excluded.url, threads.url),
+                page_count=MAX(threads.page_count, excluded.page_count)""",
+                (summary.thread_id, summary.title, summary.url, summary.page_count))
+            self.conn.execute("""INSERT INTO forum_threads
+                (forum_id, thread_id, position, is_sticky, author, reply_count, view_count, last_post_at, last_post_author, page_count, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(forum_id, thread_id) DO UPDATE SET position=excluded.position,
+                is_sticky=excluded.is_sticky, author=excluded.author, reply_count=excluded.reply_count,
+                view_count=excluded.view_count, last_post_at=excluded.last_post_at,
+                last_post_author=excluded.last_post_author, page_count=excluded.page_count,
+                last_seen_at=CURRENT_TIMESTAMP""",
+                (forum_id, summary.thread_id, position, int(summary.is_sticky), summary.author,
+                 summary.reply_count, summary.view_count, summary.last_post_at.isoformat() if summary.last_post_at else None,
+                 summary.last_post_author, summary.page_count))
+        self.conn.commit()
+        return len(summaries)
+
+    def forum_thread_rows(self, forum_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute("""SELECT t.*, ft.position, ft.is_sticky, ft.author AS listing_author,
+            ft.reply_count, ft.view_count, ft.last_post_at AS listing_last_post_at,
+            ft.last_post_author AS listing_last_post_author, ft.page_count AS listing_page_count,
+            ft.last_seen_at AS listing_seen_at
+            FROM forum_threads ft JOIN threads t ON t.thread_id=ft.thread_id
+            WHERE ft.forum_id=? ORDER BY ft.position, t.title""", (forum_id,)).fetchall()
+
+    def navigation_cache(self, source: str = "flashback") -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM navigation_cache_metadata WHERE source=?", (source,)).fetchone()
+
+    def set_navigation_cache(self, source: str, cache_key: str, source_url: str, expires_at: str) -> None:
+        self.conn.execute("""INSERT INTO navigation_cache_metadata(source, cache_key, source_url, fetched_at, expires_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?) ON CONFLICT(source) DO UPDATE SET cache_key=excluded.cache_key,
+            source_url=excluded.source_url, fetched_at=CURRENT_TIMESTAMP, expires_at=excluded.expires_at""",
+            (source, cache_key, source_url, expires_at))
         self.conn.commit()

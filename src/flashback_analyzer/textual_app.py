@@ -9,6 +9,9 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Label, ListItem, ListView, Static
 
 from .database import Database
+from .fetcher import Fetcher
+from .navigation_service import NavigationService
+from .parser import parse_thread_page
 
 
 class ThreadItem(ListItem):
@@ -24,6 +27,26 @@ class PostItem(ListItem):
         marker = "● " if unread else "  "
         time = (timestamp or "okänd tid")[:16]
         super().__init__(Label(f"{marker}#{post_id} {username} · {time}\n    {preview[:140]}"))
+
+
+class ForumItem(ListItem):
+    def __init__(self, section_id: int, title: str, is_browsable: bool) -> None:
+        self.section_id = section_id
+        super().__init__(Label(f"{title}{'  ›' if is_browsable else ''}"))
+
+
+class ForumBackItem(ListItem):
+    """The explicit parent entry in a forum navigation level."""
+
+    def __init__(self) -> None:
+        super().__init__(Label(".."))
+
+
+class ForumThreadItem(ListItem):
+    def __init__(self, thread_id: int, title: str, replies: int | None, sticky: bool) -> None:
+        self.thread_id = thread_id
+        suffix = f" · {replies} svar" if replies is not None else ""
+        super().__init__(Label(f"{'📌 ' if sticky else ''}{title or f't{thread_id}'}{suffix}"))
 
 
 class FlashbackApp(App[None]):
@@ -44,6 +67,8 @@ class FlashbackApp(App[None]):
         Binding("J", "next_unread", "Next unread"), Binding("K", "previous_unread", "Previous unread"),
         Binding("g", "first", "First", show=False), Binding("G", "last", "Last", show=False),
         Binding("n", "toggle_unread", "Unread only"), Binding("enter", "detail", "Open"),
+        Binding("f", "forums", "Forums"), Binding("t", "tracked", "Tracked"),
+        Binding("b", "up", "Up"), Binding("r", "refresh", "Refresh"),
         Binding("q", "back", "Back / quit"), Binding("?", "help", "Help"),
     ]
 
@@ -56,15 +81,18 @@ class FlashbackApp(App[None]):
         self.posts: list[object] = []
         self.visible_posts: list[object] = []
         self.unread_only = False
+        self.navigation: NavigationService | None = None
+        self.forum_mode = False
+        self.forum_stack: list[int] = []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with Horizontal(id="body"):
             with Vertical(id="threads-panel"):
-                yield Label("THREADS", classes="panel-title")
+                yield Label("THREADS", id="left-title", classes="panel-title")
                 yield ListView(id="thread-list")
             with Vertical(id="posts-panel"):
-                yield Label("POSTS", classes="panel-title")
+                yield Label("POSTS", id="center-title", classes="panel-title")
                 yield ListView(id="post-list")
             with Vertical(id="detail-panel"):
                 yield Label("DETAIL", classes="panel-title")
@@ -73,6 +101,7 @@ class FlashbackApp(App[None]):
 
     def on_mount(self) -> None:
         self.database = Database(self.db_path)
+        self.navigation = NavigationService(self.database, self.db_path.parent / "cache")
         self._load_threads()
         if self.initial_thread is not None:
             self._open_thread(self.initial_thread)
@@ -91,6 +120,102 @@ class FlashbackApp(App[None]):
             view.append(ThreadItem(int(row["thread_id"]), str(row["title"] or "untitled"), int(row["unread_count"]), int(row["post_count"])))
         if rows:
             view.index = 0
+
+    def _set_tracked_mode(self) -> None:
+        self.forum_mode = False
+        self.forum_stack.clear()
+        self.query_one("#left-title", Label).update("THREADS")
+        self.query_one("#center-title", Label).update("POSTS")
+        self._load_threads()
+        self.query_one("#thread-list", ListView).focus()
+
+    def _forum_breadcrumb(self) -> str:
+        if self.database is None:
+            return "FLASHBACK"
+        titles = []
+        for section_id in self.forum_stack:
+            row = self.database.forum_section(section_id)
+            if row:
+                titles.append(str(row["title"]))
+        return "FLASHBACK" + (" > " + " > ".join(titles) if titles else "")
+
+    def _load_forum_level(self) -> None:
+        if self.database is None or self.navigation is None:
+            return
+        self.forum_mode = True
+        current_id = self.forum_stack[-1] if self.forum_stack else None
+        rows = self.navigation.list_root() if current_id is None else self.navigation.list_children(current_id)
+        left = self.query_one("#thread-list", ListView)
+        left.clear()
+        if current_id is not None:
+            left.append(ForumBackItem())
+        for row in rows:
+            left.append(ForumItem(int(row["id"]), str(row["title"]), bool(row["is_browsable"])))
+        if left.children:
+            # Keep the parent entry visible, but start on the first real item.
+            left.index = 1 if current_id is not None and len(left.children) > 1 else 0
+        self.query_one("#left-title", Label).update(f"FORUMS · {self._forum_breadcrumb()}")
+        self.query_one("#center-title", Label).update("THREADS")
+        center = self.query_one("#post-list", ListView)
+        center.clear()
+        if current_id is not None:
+            for row in self.navigation.list_threads(current_id):
+                center.append(ForumThreadItem(int(row["thread_id"]), str(row["title"] or ""), row["reply_count"], bool(row["is_sticky"])))
+        left.focus()
+
+    def _start_navigation_refresh(self, section_id: int | None = None) -> None:
+        if self.navigation is None:
+            return
+        if section_id is None and not self.navigation.is_stale():
+            return
+        self.run_worker(lambda: self._refresh_navigation(section_id), thread=True, exclusive=True)
+
+    def _refresh_navigation(self, section_id: int | None) -> None:
+        try:
+            if self.navigation is None:
+                return
+            if section_id is None:
+                self.navigation.refresh()
+            else:
+                self.navigation.refresh_forum(section_id, force=True)
+            self.call_from_thread(self._load_forum_level)
+        except Exception as exc:
+            self.call_from_thread(self.notify, f"Navigation refresh failed; cached data remains available: {exc}", severity="warning")
+
+    def _open_forum(self, section_id: int) -> None:
+        self.forum_stack.append(section_id)
+        self._load_forum_level()
+        if self.navigation and not self.navigation.list_children(section_id) and not self.navigation.list_threads(section_id):
+            self.notify("Loading forum listing…")
+            self._start_navigation_refresh(section_id)
+
+    def _open_forum_thread(self, thread_id: int) -> None:
+        if self.database is None:
+            return
+        if self.database.thread_posts(thread_id):
+            self._open_thread(thread_id)
+            return
+        row = self.database.conn.execute("SELECT url FROM threads WHERE thread_id=?", (thread_id,)).fetchone()
+        if not row:
+            self.notify("Thread listing has no usable URL.", severity="warning")
+            return
+        self.notify("Ingesting thread…")
+        self.run_worker(lambda: self._ingest_thread(thread_id, str(row["url"])), thread=True, exclusive=True)
+
+    def _ingest_thread(self, thread_id: int, url: str) -> None:
+        try:
+            with Fetcher(self.db_path.parent / "cache") as fetcher:
+                html = fetcher.fetch_url(url)
+            parsed = parse_thread_page(html, thread_id=thread_id, page=1, source_url=url)
+            with Database(self.db_path) as database:
+                database.store_page(parsed)
+            self.call_from_thread(self._ingestion_finished, thread_id)
+        except Exception as exc:
+            self.call_from_thread(self.notify, f"Could not ingest thread: {exc}", severity="error")
+
+    def _ingestion_finished(self, thread_id: int) -> None:
+        self.notify("Thread ready")
+        self._open_thread(thread_id)
 
     def _open_thread(self, thread_id: int) -> None:
         if self.database is None:
@@ -177,6 +302,32 @@ class FlashbackApp(App[None]):
         if self.thread_id is not None:
             self.unread_only = not self.unread_only; self._render_posts()
 
+    def action_forums(self) -> None:
+        self.thread_id = None
+        self._load_forum_level()
+        self._start_navigation_refresh()
+
+    def action_tracked(self) -> None:
+        self.thread_id = None
+        self._set_tracked_mode()
+
+    def action_up(self) -> None:
+        if self.thread_id is not None:
+            self.action_back()
+        elif self.forum_mode:
+            if self.forum_stack:
+                self.forum_stack.pop()
+                self._load_forum_level()
+            else:
+                self._set_tracked_mode()
+
+    def action_refresh(self) -> None:
+        if self.forum_mode:
+            section_id = self.forum_stack[-1] if self.forum_stack else None
+            self._start_navigation_refresh(section_id)
+        elif self.thread_id is not None:
+            self.notify("Use fb sync for thread synchronization.")
+
     def action_detail(self) -> None:
         view = self.query_one("#post-list", ListView)
         if view.index is not None and self.visible_posts:
@@ -187,7 +338,12 @@ class FlashbackApp(App[None]):
         if self.thread_id is not None:
             self.thread_id = None; self.posts = []; self.visible_posts = []
             self.query_one("#post-list", ListView).clear(); self.query_one("#detail", Static).update("Select a thread to begin.")
-            self.query_one("#thread-list", ListView).focus()
+            if self.forum_mode:
+                self._load_forum_level()
+            else:
+                self.query_one("#thread-list", ListView).focus()
+        elif self.forum_mode:
+            self.action_up()
         else:
             self.exit()
 
@@ -197,6 +353,12 @@ class FlashbackApp(App[None]):
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         if isinstance(event.item, ThreadItem):
             self._open_thread(event.item.thread_id)
+        elif isinstance(event.item, ForumItem):
+            self._open_forum(event.item.section_id)
+        elif isinstance(event.item, ForumBackItem):
+            self.action_up()
+        elif isinstance(event.item, ForumThreadItem):
+            self._open_forum_thread(event.item.thread_id)
         elif isinstance(event.item, PostItem) and self.visible_posts:
             row = next((row for row in self.visible_posts if int(row["post_id"]) == event.item.post_id), self.visible_posts[0]); self._show_post(row); self._mark_seen(row)
 

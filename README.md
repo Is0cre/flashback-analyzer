@@ -140,6 +140,11 @@ tråden. Tryck `r` i trådlistan för att uppdatera listorna.
 Discovery-resultat sparas i SQLite, så den senast kända listan visas även om
 forumets live-sidor tillfälligt inte kan hämtas.
 
+Tryck `f` i Textual-läsaren för att bläddra i Flashbacks cacheade forumträd.
+`Enter` öppnar kategori/forum, `b` går upp, `t` återgår till sparade trådar och
+`r` uppdaterar den aktuella nivån. Forumträdet cacheas i SQLite och visas
+offline; en ny tråd hämtas först när den väljs.
+
 Live-listan visar visningar, läsare och svar innan hämtning. TUI:t hämtar en
 sida som standard, visar en grov siduppskattning och kräver extra bekräftelse
 för att hämta hela trådar med minst 1 000 svar.

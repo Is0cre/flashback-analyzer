@@ -135,6 +135,9 @@ TUI:t är kompakt som standard. Visa ANSI-logotypen uttryckligen med:
 fb tui --logo
 ```
 
+Menyerna navigeras med ↑/↓ och Enter. q eller Escape avslutar en meny; text
+behövs bara när du anger tråd eller antal sidor.
+
 The TUI displays the repository ANSI logo from `assets/ansi-art.utf.ans`
 when available.
 

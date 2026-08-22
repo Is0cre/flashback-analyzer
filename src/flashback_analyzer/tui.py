@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import curses
 import sqlite3
 from pathlib import Path
+import sys
 
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
@@ -96,6 +98,51 @@ def _pause(console: Console) -> None:
     Prompt.ask("Enter för att återgå", default="", console=console)
 
 
+def _select_option(console: Console, title: str, options: list[tuple[str, object]]) -> object:
+    """Select an option with arrows and Enter; retain a piped-input fallback."""
+    if not sys.stdin.isatty():
+        labels = [label for label, _ in options]
+        choice = Prompt.ask(title, choices=[str(index) for index in range(1, len(labels) + 1)] + ["q"], console=console)
+        if choice == "q":
+            return "quit"
+        return options[int(choice) - 1][1]
+
+    def screen(stdscr: object) -> object:
+        window = stdscr  # type: ignore[assignment]
+        curses.curs_set(0)
+        selected = 0
+        while True:
+            window.erase()
+            height, width = window.getmaxyx()
+            window.addnstr(1, 2, title, max(1, width - 4), curses.A_BOLD)
+            for index, (label, _) in enumerate(options):
+                if index + 3 >= height - 1:
+                    break
+                prefix = "▶ " if index == selected else "  "
+                attr = curses.A_REVERSE if index == selected else curses.A_NORMAL
+                window.addnstr(index + 3, 2, prefix + label, max(1, width - 4), attr)
+            window.addnstr(max(1, height - 2), 2, "↑/↓ navigera · Enter välj · q avsluta", max(1, width - 4))
+            window.refresh()
+            key = window.getch()
+            if key in (curses.KEY_UP, ord("k")):
+                selected = (selected - 1) % len(options)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                selected = (selected + 1) % len(options)
+            elif key in (curses.KEY_ENTER, 10, 13):
+                return options[selected][1]
+            elif key in (27, ord("q")):
+                return "quit"
+
+    try:
+        return curses.wrapper(screen)
+    except curses.error:
+        labels = [label for label, _ in options]
+        choice = Prompt.ask(title, choices=[str(index) for index in range(1, len(labels) + 1)] + ["q"], console=console)
+        if choice == "q":
+            return "quit"
+        return options[int(choice) - 1][1]
+
+
 def _page_options(console: Console, *, default_pages: int = 1, reply_count: int | None = None) -> tuple[int, bool]:
     estimate = f" · cirka {(reply_count + 1 + 19) // 20} sidor" if reply_count is not None else ""
     reply_note = f" ({reply_count:,} svar{estimate})" if reply_count is not None else ""
@@ -146,7 +193,7 @@ def _sync(database: Database, cache_dir: Path, thread_id: int, console: Console)
 
 def _workspace_menu(console: Console, database: Database, logo: Text | None, live_items: list[DiscoveryItem]) -> int | None | str:
     _clear_header(console, logo, "Flashback Analyzer · Trådar")
-    choices: list[tuple[str, int | str]] = []
+    choices: list[tuple[str, object]] = []
     if live_items:
         table = Table(title="Live från Flashback")
         table.add_column("Val", justify="right")
@@ -172,27 +219,24 @@ def _workspace_menu(console: Console, database: Database, logo: Text | None, liv
         console.print(table)
     else:
         console.print("[dim]Inga trådar ännu.[/]")
-    choice = Prompt.ask("[a] Lägg till tråd · [r] Uppdatera live · [q] Avsluta", choices=[value for value, _ in choices] + ["a", "r", "q"], console=console)
-    if choice == "a":
-        return "add"
-    if choice == "q":
-        return "quit"
-    if choice == "r":
-        return "refresh"
-    return dict(choices)[choice]
+    choices.extend([("Lägg till tråd", "add"), ("Uppdatera live-listan", "refresh"), ("Avsluta", "quit")])
+    return _select_option(console, "Välj med piltangenter", choices)
 
 
 def _thread_menu(console: Console, database: Database, cache_dir: Path, logo: Text | None, thread_id: int) -> int | None | str:
     _clear_header(console, logo, f"Flashback Analyzer · t{thread_id}")
     _overview(console, database.conn, thread_id)
-    console.print("\n[bold]1[/] Översikt  [bold]2[/] Ämnen  [bold]3[/] Frågor  [bold]4[/] Segment  [bold]5[/] Länkar")
-    console.print("[bold]6[/] Hämta sidor  [bold]7[/] Synka svansen  [bold]a[/] Lägg till tråd  [bold]b[/] Trådlista  [bold]q[/] Avsluta")
-    choice = Prompt.ask("Val", choices=["1", "2", "3", "4", "5", "6", "7", "a", "b", "q"], default="1", console=console)
-    if choice == "q":
+    choices = [
+        ("Översikt", "1"), ("Ämnen", "2"), ("Frågor", "3"), ("Segment", "4"), ("Länkar", "5"),
+        ("Hämta sidor", "6"), ("Synka svansen", "7"), ("Lägg till tråd", "add"),
+        ("Tillbaka till trådlistan", "back"), ("Avsluta", "quit"),
+    ]
+    choice = _select_option(console, "Trådmeny · välj med piltangenter", choices)
+    if choice == "quit":
         return "quit"
-    if choice == "b":
+    if choice == "back":
         return None
-    if choice == "a":
+    if choice == "add":
         return "add"
     if choice == "6":
         _ingest(database, cache_dir, f"t{thread_id}", console)

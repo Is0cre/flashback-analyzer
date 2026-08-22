@@ -32,3 +32,6 @@ class ParsedPage:
     title: str | None
     posts: list[Post]
     max_page: int
+    source_url: str | None = None
+    raw_html: str | None = None
+    forum_name: str | None = None

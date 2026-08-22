@@ -7,6 +7,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup, Tag
 
 from .models import ParsedPage, Post, Quote
+from .urls import normalize_url
 
 POST_MESSAGE_ID_RE = re.compile(r"post_message_(\d+)")
 POST_ID_RE = re.compile(r"(?:post|p)(?:_|-)?(\d+)", re.I)
@@ -132,16 +133,19 @@ def _extract_links(message: Tag) -> list[str]:
         href = str(a.get("href", "")).strip()
         if not href or href.startswith(("javascript:", "mailto:")):
             continue
-        absolute = urljoin("https://www.flashback.org/", href)
+        absolute = normalize_url(urljoin("https://www.flashback.org/", href))
         if absolute not in seen:
             seen.add(absolute)
             links.append(absolute)
     return links
 
 
-def parse_thread_page(html: str, thread_id: int, page: int) -> ParsedPage:
+def parse_thread_page(
+    html: str, thread_id: int, page: int, *, source_url: str | None = None
+) -> ParsedPage:
     soup = BeautifulSoup(html, "html.parser")
     title = _text(soup.find("h1")) or (soup.title.string.strip() if soup.title and soup.title.string else None)
+    forum_name = _text(soup.select_one(".breadcrumb a:last-child, nav.breadcrumb a:last-child")) or None
 
     messages = soup.select("div.post_message[id^='post_message_']")
     if not messages:
@@ -184,4 +188,7 @@ def parse_thread_page(html: str, thread_id: int, page: int) -> ParsedPage:
         title=title,
         posts=posts,
         max_page=max_page,
+        source_url=source_url,
+        raw_html=html,
+        forum_name=forum_name,
     )

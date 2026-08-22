@@ -31,7 +31,7 @@ def ingest(
 
     with Fetcher(cache) as fetcher, Database(db) as database:
         first_html = fetcher.fetch_thread_page(ref.thread_id, ref.page, refresh=refresh)
-        first = parse_thread_page(first_html, ref.thread_id, ref.page)
+        first = parse_thread_page(first_html, ref.thread_id, ref.page, source_url=ref.canonical_url)
         count = database.store_page(first)
         console.print(f"[green]Sida {ref.page}:[/] {count} inlägg")
 
@@ -42,11 +42,73 @@ def ingest(
 
         for page in page_numbers:
             html = fetcher.fetch_thread_page(ref.thread_id, page, refresh=refresh)
-            parsed = parse_thread_page(html, ref.thread_id, page)
+            parsed = parse_thread_page(html, ref.thread_id, page, source_url=f"https://www.flashback.org/t{ref.thread_id}{f'p{page}' if page != 1 else ''}")
             count = database.store_page(parsed)
             console.print(f"[green]Sida {page}:[/] {count} inlägg")
 
     console.print(f"\nKlar. Databas: [bold]{db}[/]")
+
+
+@app.command()
+def sync(
+    thread: str = typer.Argument(..., help="Thread URL or t<ID>."),
+    db: Path = typer.Option(DEFAULT_DB, help="SQLite path."),
+    cache: Path = typer.Option(DEFAULT_CACHE, help="HTML cache directory."),
+) -> None:
+    """Refresh only the current tail and pages discovered after it."""
+    ref = parse_thread_ref(thread)
+    with Database(db) as database:
+        try:
+            existing = database.conn.execute(
+                """SELECT t.thread_id, MAX(p.page) AS latest_page FROM threads t
+                   LEFT JOIN posts p ON p.thread_id=t.thread_id WHERE t.thread_id=? GROUP BY t.thread_id""",
+                (ref.thread_id,),
+            ).fetchone()
+        except Exception as exc:
+            raise typer.BadParameter(f"Kunde inte läsa tråden: {exc}") from exc
+        if existing is None:
+            raise typer.BadParameter("Tråden finns inte i databasen. Kör 'fb ingest' först.")
+        last_page = max(1, int(existing["latest_page"] or 1))
+        with Fetcher(cache) as fetcher:
+            # The last known page can receive new posts; a refresh is required here.
+            html = fetcher.fetch_thread_page(ref.thread_id, last_page, refresh=True)
+            parsed = parse_thread_page(html, ref.thread_id, last_page, source_url=f"https://www.flashback.org/t{ref.thread_id}{f'p{last_page}' if last_page != 1 else ''}")
+            database.store_page(parsed)
+            new_pages = range(last_page + 1, parsed.max_page + 1)
+            for page in new_pages:
+                html = fetcher.fetch_thread_page(ref.thread_id, page)
+                parsed = parse_thread_page(html, ref.thread_id, page, source_url=f"https://www.flashback.org/t{ref.thread_id}p{page}")
+                database.store_page(parsed)
+    console.print(f"[green]Synkroniserad:[/] sida {last_page} och {max(0, parsed.max_page - last_page)} nya sidor")
+
+
+@app.command("thread-info")
+def thread_info(thread: str = typer.Argument(...), db: Path = typer.Option(DEFAULT_DB)) -> None:
+    """Show stored thread metadata."""
+    ref = parse_thread_ref(thread)
+    with Database(db) as database:
+        try:
+            summary = database.thread_summary(ref.thread_id)
+        except KeyError:
+            raise typer.BadParameter("Tråden finns inte i databasen. Kör 'fb ingest' först.")
+    for key in ("thread_id", "title", "url", "first_seen_at", "last_fetched_at", "first_post", "last_post", "page_count", "posts", "users"):
+        console.print(f"{key}: {summary.get(key)}")
+
+
+@app.command()
+def links(thread: str = typer.Argument(...), db: Path = typer.Option(DEFAULT_DB)) -> None:
+    """Show normalized domains, link counts, unique URLs, and linking users."""
+    ref = parse_thread_ref(thread)
+    with Database(db) as database:
+        rows = database.link_statistics(ref.thread_id)
+    table = Table(title="Länkkällor")
+    table.add_column("Domän")
+    table.add_column("Länkar", justify="right")
+    table.add_column("Unika URL:er", justify="right")
+    table.add_column("Unika användare", justify="right")
+    for row in rows:
+        table.add_row(str(row["domain"]), str(row["links"]), str(row["unique_urls"]), str(row["unique_users"]))
+    console.print(table)
 
 
 @app.command()

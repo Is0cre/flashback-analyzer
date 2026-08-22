@@ -1,4 +1,4 @@
-from flashback_analyzer.urls import parse_thread_ref, thread_page_url
+from flashback_analyzer.urls import normalize_url, parse_thread_ref, thread_page_url, url_domain
 
 
 def test_parse_thread_url():
@@ -10,3 +10,9 @@ def test_parse_thread_url():
 def test_page_url():
     assert thread_page_url(123, 1) == "https://www.flashback.org/t123"
     assert thread_page_url(123, 4) == "https://www.flashback.org/t123p4"
+
+
+def test_normalize_url_removes_tracking_and_normalizes_host():
+    value = normalize_url("HTTPS://WWW.Example.COM/story/?utm_source=x&b=2#section")
+    assert value == "https://example.com/story?b=2"
+    assert url_domain(value) == "example.com"

@@ -198,10 +198,10 @@ def _thread_menu(console: Console, database: Database, cache_dir: Path, logo: Te
     return thread_id
 
 
-def run_tui(database: Database, thread_id: int | None = None, *, cache_dir: Path = Path("data/cache"), console: Console | None = None) -> None:
+def run_tui(database: Database, thread_id: int | None = None, *, cache_dir: Path = Path("data/cache"), show_logo: bool = False, console: Console | None = None) -> None:
     """Run a clear, navigable terminal browser with thread management."""
     output = console or Console()
-    logo = _logo()
+    logo = _logo() if show_logo else None
     selected: int | None | str = thread_id
     while True:
         if selected == "quit":

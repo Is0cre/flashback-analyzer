@@ -121,6 +121,12 @@ antal sidor att hämta eller välja att hämta alla upptäckta sidor:
 fb tui
 ```
 
+TUI:t är kompakt som standard. Visa ANSI-logotypen uttryckligen med:
+
+```bash
+fb tui --logo
+```
+
 The TUI displays the repository ANSI logo from `assets/ansi-art.utf.ans`
 when available.
 

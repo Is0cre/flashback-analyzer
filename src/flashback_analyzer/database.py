@@ -7,7 +7,7 @@ from pathlib import Path
 from .models import ParsedPage
 from .urls import normalize_url, thread_page_url, url_domain
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -118,6 +118,18 @@ CREATE TABLE IF NOT EXISTS post_questions (
 );
 CREATE INDEX IF NOT EXISTS idx_questions_thread ON questions(thread_id);
 CREATE INDEX IF NOT EXISTS idx_post_questions_question ON post_questions(question_id);
+CREATE TABLE IF NOT EXISTS discovery_items (
+    feed TEXT NOT NULL,
+    thread_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    views INTEGER,
+    readers INTEGER,
+    replies INTEGER,
+    source_url TEXT NOT NULL,
+    fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(feed, thread_id)
+);
+CREATE INDEX IF NOT EXISTS idx_discovery_items_fetched ON discovery_items(fetched_at);
 """
 
 
@@ -221,3 +233,26 @@ class Database:
             COUNT(DISTINCT p.user_id) AS unique_users FROM links l JOIN posts p ON p.post_id=l.post_id
             WHERE p.thread_id=? GROUP BY l.domain ORDER BY links DESC, l.domain""", (thread_id,)).fetchall()
         return [dict(row) for row in rows]
+
+    def store_discovery_items(self, items: list[object]) -> int:
+        """Persist the latest live-feed candidates for offline TUI startup."""
+        stored = 0
+        for item in items:
+            self.conn.execute("""INSERT INTO discovery_items(feed, thread_id, title, views, readers, replies, source_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(feed, thread_id) DO UPDATE SET title=excluded.title,
+                views=excluded.views, readers=excluded.readers, replies=excluded.replies,
+                source_url=excluded.source_url, fetched_at=CURRENT_TIMESTAMP""",
+                (item.feed, item.thread_id, item.title, item.views, item.readers, item.replies, item.url))
+            stored += 1
+        self.conn.commit()
+        return stored
+
+    def cached_discovery_items(self) -> list[object]:
+        """Return the most recently cached candidate for each discovered thread."""
+        from .discovery import DiscoveryItem
+
+        rows = self.conn.execute("""SELECT d.feed, d.thread_id, d.title, d.views, d.readers, d.replies
+            FROM discovery_items d JOIN (SELECT thread_id, MAX(fetched_at) AS fetched_at
+            FROM discovery_items GROUP BY thread_id) latest ON latest.thread_id=d.thread_id AND latest.fetched_at=d.fetched_at
+            ORDER BY d.feed, d.replies DESC, d.readers DESC, d.thread_id""").fetchall()
+        return [DiscoveryItem(row["feed"], row["thread_id"], row["title"], row["views"], row["readers"], row["replies"]) for row in rows]

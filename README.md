@@ -125,6 +125,9 @@ Vid start läser TUI:t också de cacheade/live listorna för aktuella, populära
 nya ämnen och nya inlägg. Välj en rad med dess nummer för att börja hämta
 tråden. Tryck `r` i trådlistan för att uppdatera listorna.
 
+Discovery-resultat sparas i SQLite, så den senast kända listan visas även om
+forumets live-sidor tillfälligt inte kan hämtas.
+
 Live-listan visar visningar, läsare och svar innan hämtning. TUI:t hämtar en
 sida som standard, visar en grov siduppskattning och kräver extra bekräftelse
 för att hämta hela trådar med minst 1 000 svar.

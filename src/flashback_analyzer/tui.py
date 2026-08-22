@@ -270,10 +270,14 @@ def run_tui(database: Database, thread_id: int | None = None, *, cache_dir: Path
     logo = _logo() if show_logo else None
     live_items: list[DiscoveryItem] = []
     if thread_id is None:
+        live_items = database.cached_discovery_items()
         output.print("[dim]Läser aktuella Flashback-trådar...[/]")
         try:
             with Fetcher(cache_dir) as fetcher:
-                live_items = fetch_discovery_items(fetcher)
+                fetched_items = fetch_discovery_items(fetcher)
+                if fetched_items:
+                    database.store_discovery_items(fetched_items)
+                    live_items = fetched_items
         except Exception as exc:
             output.print(f"[yellow]Live-listan kunde inte hämtas: {exc}[/]")
     selected: int | None | str = thread_id
@@ -293,7 +297,10 @@ def run_tui(database: Database, thread_id: int | None = None, *, cache_dir: Path
             output.print("[dim]Uppdaterar live-listan...[/]")
             try:
                 with Fetcher(cache_dir) as fetcher:
-                    live_items = fetch_discovery_items(fetcher, refresh=True)
+                    fetched_items = fetch_discovery_items(fetcher, refresh=True)
+                    if fetched_items:
+                        database.store_discovery_items(fetched_items)
+                        live_items = fetched_items
             except Exception as exc:
                 output.print(f"[yellow]Live-listan kunde inte hämtas: {exc}[/]")
                 _pause(output)

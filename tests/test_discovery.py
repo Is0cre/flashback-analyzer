@@ -1,6 +1,7 @@
 from datetime import date
 
 from flashback_analyzer.discovery import feed_urls, parse_discovery_page
+from flashback_analyzer.database import Database
 
 
 HTML = """
@@ -25,3 +26,12 @@ def test_feed_urls_are_date_scoped():
     urls = feed_urls(date(2026, 8, 22))
     assert urls["aktuella"].endswith("/aktuella-amnen/2026-08-22")
     assert urls["nya inlägg"].endswith("/nya-inlagg/2026-08-22")
+
+
+def test_discovery_items_are_cached_in_sqlite(tmp_path):
+    items = parse_discovery_page(HTML, "aktuella")
+    with Database(tmp_path / "test.sqlite3") as db:
+        assert db.store_discovery_items(items) == 2
+        cached = db.cached_discovery_items()
+        assert [item.thread_id for item in cached] == [1234567, 7654321]
+        assert cached[0].replies == 78

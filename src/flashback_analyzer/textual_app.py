@@ -18,7 +18,7 @@ class ThreadItem(ListItem):
     def __init__(self, thread_id: int, title: str, unread: int, posts: int) -> None:
         self.thread_id = thread_id
         text = f"{'+' + str(unread) if unread else '  '}  {title or f't{thread_id}'}  ({posts})"
-        super().__init__(Label(text))
+        super().__init__(Label(text, markup=False))
 
 
 class PostItem(ListItem):
@@ -26,27 +26,27 @@ class PostItem(ListItem):
         self.post_id = post_id
         marker = "● " if unread else "  "
         time = (timestamp or "okänd tid")[:16]
-        super().__init__(Label(f"{marker}#{post_id} {username} · {time}\n    {preview[:140]}"))
+        super().__init__(Label(f"{marker}#{post_id} {username} · {time}\n    {preview[:140]}", markup=False))
 
 
 class ForumItem(ListItem):
     def __init__(self, section_id: int, title: str, is_browsable: bool) -> None:
         self.section_id = section_id
-        super().__init__(Label(f"{title}{'  ›' if is_browsable else ''}"))
+        super().__init__(Label(f"{title}{'  ›' if is_browsable else ''}", markup=False))
 
 
 class ForumBackItem(ListItem):
     """The explicit parent entry in a forum navigation level."""
 
     def __init__(self) -> None:
-        super().__init__(Label(".."))
+        super().__init__(Label("..", markup=False))
 
 
 class ForumThreadItem(ListItem):
     def __init__(self, thread_id: int, title: str, replies: int | None, sticky: bool) -> None:
         self.thread_id = thread_id
         suffix = f" · {replies} svar" if replies is not None else ""
-        super().__init__(Label(f"{'📌 ' if sticky else ''}{title or f't{thread_id}'}{suffix}"))
+        super().__init__(Label(f"{'📌 ' if sticky else ''}{title or f't{thread_id}'}{suffix}", markup=False))
 
 
 class FlashbackApp(App[None]):
@@ -96,7 +96,7 @@ class FlashbackApp(App[None]):
                 yield ListView(id="post-list")
             with Vertical(id="detail-panel"):
                 yield Label("DETAIL", classes="panel-title")
-                yield Static("Select a thread to begin.", id="detail")
+                yield Static("Select a thread to begin.", id="detail", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:

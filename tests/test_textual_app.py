@@ -70,3 +70,21 @@ async def test_textual_forum_mode_browses_cached_hierarchy_and_listing(tmp_path)
         await pilot.press("b")
         await pilot.pause()
         assert app.forum_stack == [root["id"]]
+
+
+@pytest.mark.asyncio
+async def test_textual_renders_flashback_bbcode_as_literal_text(tmp_path):
+    parsed = parse_thread_page(FIXTURE.read_text(), thread_id=1000, page=1)
+    parsed.title = "[MOD] Tråd med markup"
+    parsed.posts[0].author = "moderator[/MOD]"
+    parsed.posts[0].text = "Text med en avslutande tagg [/MOD]"
+    db_path = tmp_path / "markup.sqlite3"
+    with Database(db_path) as db:
+        db.store_page(parsed)
+
+    app = FlashbackApp(db_path)
+    async with app.run_test() as pilot:
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.thread_id == 1000
+        assert "[/MOD]" in str(app.query_one("#detail").render())

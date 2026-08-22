@@ -192,36 +192,43 @@ def _sync(database: Database, cache_dir: Path, thread_id: int, console: Console)
 
 
 def _workspace_menu(console: Console, database: Database, logo: Text | None, live_items: list[DiscoveryItem]) -> int | None | str:
-    _clear_header(console, logo, "Flashback Analyzer · Trådar")
+    _clear_header(console, logo, "Flashback Analyzer · Arbetsyta")
+    saved_count = database.conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
+    console.print(f"Live-kandidater: [bold]{len(live_items)}[/]   Sparade trådar: [bold]{saved_count}[/]\n")
+    choices = [
+        (f"Live från Flashback · {len(live_items)} kandidater", "live_menu"),
+        (f"Sparade trådar · {saved_count} analyserade", "saved_menu"),
+        ("Lägg till tråd manuellt", "add"),
+        ("Uppdatera live-listan", "refresh"),
+        ("Avsluta", "quit"),
+    ]
+    return _select_option(console, "Arbetsyta · välj med piltangenter", choices)
+
+
+def _live_menu(console: Console, logo: Text | None, live_items: list[DiscoveryItem]) -> DiscoveryItem | str | None:
+    _clear_header(console, logo, "Flashback Analyzer · Live från Flashback")
     choices: list[tuple[str, object]] = []
-    if live_items:
-        table = Table(title="Live från Flashback")
-        table.add_column("Val", justify="right")
-        table.add_column("Källa")
-        table.add_column("Tråd")
-        table.add_column("Visningar", justify="right")
-        table.add_column("Läsare", justify="right")
-        table.add_column("Svar", justify="right")
-        for index, item in enumerate(live_items[:20], start=1):
-            table.add_row(str(index), item.feed, f"t{item.thread_id} · {item.title[:90]}", *(str(value) if value is not None else "?" for value in (item.views, item.readers, item.replies)))
-            replies = f" · {item.replies:,} svar" if item.replies is not None else ""
-            choices.append((f"{index}. {item.feed} · t{item.thread_id} · {item.title[:72]}{replies}", item))
-        console.print(table)
-    rows = database.conn.execute("SELECT thread_id, title, post_count FROM threads ORDER BY last_fetched_at DESC, thread_id").fetchall()
-    if rows:
-        table = Table(title="Sparade trådar")
-        table.add_column("Val", justify="right")
-        table.add_column("Tråd")
-        table.add_column("Inlägg", justify="right")
-        offset = len(choices)
-        for index, row in enumerate(rows, start=offset + 1):
-            table.add_row(str(index), f"t{row['thread_id']} · {row['title'] or 'utan titel'}", f"{row['post_count']:,}")
-            choices.append((f"{index}. t{row['thread_id']} · {(row['title'] or 'utan titel')[:80]} · {row['post_count']:,} inlägg", int(row["thread_id"])))
-        console.print(table)
-    else:
-        console.print("[dim]Inga trådar ännu.[/]")
-    choices.extend([("Lägg till tråd", "add"), ("Uppdatera live-listan", "refresh"), ("Avsluta", "quit")])
-    return _select_option(console, "Välj med piltangenter", choices)
+    for index, item in enumerate(live_items[:20], start=1):
+        replies = f" · {item.replies:,} svar" if item.replies is not None else ""
+        readers = f" · {item.readers:,} läsare" if item.readers is not None else ""
+        choices.append((f"{index}. {item.feed} · t{item.thread_id} · {item.title[:72]}{replies}{readers}", item))
+    choices.append(("Tillbaka till arbetsytan", "back"))
+    choice = _select_option(console, "Live-lista · välj tråd", choices)
+    return None if choice == "back" else choice
+
+
+def _saved_menu(console: Console, database: Database, logo: Text | None) -> int | str | None:
+    _clear_header(console, logo, "Flashback Analyzer · Sparade trådar")
+    rows = database.conn.execute("""SELECT t.thread_id, t.title, t.post_count, t.last_fetched_at,
+        COUNT(DISTINCT p.user_id) AS users FROM threads t LEFT JOIN posts p ON p.thread_id=t.thread_id
+        GROUP BY t.thread_id ORDER BY t.last_fetched_at DESC, t.thread_id""").fetchall()
+    choices: list[tuple[str, object]] = []
+    for index, row in enumerate(rows, start=1):
+        fetched = (row["last_fetched_at"] or "okänd tid").replace("T", " ")[:16]
+        choices.append((f"{index}. t{row['thread_id']} · {(row['title'] or 'utan titel')[:72]} · {row['post_count']:,} inlägg · {row['users']:,} användare · {fetched}", int(row["thread_id"])))
+    choices.append(("Tillbaka till arbetsytan", "back"))
+    choice = _select_option(console, "Sparade trådar · välj tråd", choices)
+    return None if choice == "back" else choice
 
 
 def _thread_menu(console: Console, database: Database, cache_dir: Path, logo: Text | None, thread_id: int) -> int | None | str:
@@ -306,6 +313,12 @@ def run_tui(database: Database, thread_id: int | None = None, *, cache_dir: Path
                 output.print(f"[yellow]Live-listan kunde inte hämtas: {exc}[/]")
                 _pause(output)
             selected = None
+            continue
+        if selected == "live_menu":
+            selected = _live_menu(output, logo, live_items)
+            continue
+        if selected == "saved_menu":
+            selected = _saved_menu(output, database, logo)
             continue
         if isinstance(selected, DiscoveryItem):
             _clear_header(output, logo, "Flashback Analyzer · Lägg till tråd")

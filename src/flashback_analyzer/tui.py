@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 from rich.console import Console
 from rich.prompt import Prompt
+from rich.text import Text
 from rich.table import Table
+
+
+def _logo() -> Text | None:
+    """Load the optional repository logo without making the TUI depend on it."""
+    candidates = (
+        Path("assets/ansi-art.utf.ans"),
+        Path("ansi-art.utf.ans"),
+        Path(__file__).resolve().parents[2] / "assets" / "ansi-art.utf.ans",
+    )
+    for path in candidates:
+        if path.is_file():
+            return Text.from_ansi(path.read_text(encoding="utf-8"))
+    return None
 
 
 def _overview(console: Console, conn: sqlite3.Connection, thread_id: int) -> None:
@@ -56,8 +71,11 @@ def _links(console: Console, conn: sqlite3.Connection, thread_id: int) -> None:
 def run_tui(conn: sqlite3.Connection, thread_id: int, *, console: Console | None = None) -> None:
     """Run a small read-only terminal browser over stored analysis data."""
     output = console or Console()
+    logo = _logo()
     while True:
         output.clear()
+        if logo is not None:
+            output.print(logo, crop=True, overflow="crop")
         _overview(output, conn, thread_id)
         output.print("\n[bold]1[/] Översikt  [bold]2[/] Ämnen  [bold]3[/] Segment  [bold]4[/] Länkar  [bold]q[/] Avsluta")
         choice = Prompt.ask("Val", choices=["1", "2", "3", "4", "q"], default="1", console=output)

@@ -105,6 +105,9 @@ En liten interaktiv terminalvy finns också:
 fb tui t3742384C
 ```
 
+The TUI displays the repository ANSI logo from `assets/ansi-art.utf.ans`
+when available.
+
 Alla kommandon accepterar korta referenser som `t3742384C`; fullständig
 `https://www.flashback.org/`-URL behövs inte.
 

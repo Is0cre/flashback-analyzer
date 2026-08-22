@@ -10,6 +10,7 @@ from .analysis import participation_concentration
 from .database import Database
 from .fetcher import Fetcher
 from .parser import parse_thread_page
+from .segmentation import build_segments
 from .urls import parse_thread_ref
 
 app = typer.Typer(no_args_is_help=True, help="Read-only Flashback thread analyzer.")
@@ -108,6 +109,28 @@ def links(thread: str = typer.Argument(...), db: Path = typer.Option(DEFAULT_DB)
     table.add_column("Unika användare", justify="right")
     for row in rows:
         table.add_row(str(row["domain"]), str(row["links"]), str(row["unique_urls"]), str(row["unique_users"]))
+    console.print(table)
+
+
+@app.command()
+def segments(
+    thread: str = typer.Argument(...),
+    size: int = typer.Option(75, min=1, help="Target maximum posts per segment."),
+    gap_hours: float = typer.Option(24.0, min=0.01, help="Split after this inactivity gap when a segment is large enough."),
+    db: Path = typer.Option(DEFAULT_DB),
+) -> None:
+    """Build and display chronological analysis segments."""
+    ref = parse_thread_ref(thread)
+    with Database(db) as database:
+        try:
+            rows = build_segments(database.conn, ref.thread_id, max_posts=size, gap_hours=gap_hours)
+        except KeyError:
+            raise typer.BadParameter("Tråden finns inte i databasen. Kör 'fb ingest' först.")
+    table = Table(title="Kronologiska segment")
+    for name in ("Segment", "Första post", "Sista post", "Start", "Slut", "Inlägg"):
+        table.add_column(name, justify="right" if name in {"Segment", "Första post", "Sista post", "Inlägg"} else "left")
+    for row in rows:
+        table.add_row(str(row.number), str(row.first_post_id), str(row.last_post_id), row.start_time or "?", row.end_time or "?", str(row.post_count))
     console.print(table)
 
 

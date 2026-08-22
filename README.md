@@ -12,6 +12,7 @@ Read-only grund för att samla in och analysera Flashback-trådar utan att bland
 - sparar rå HTML per trådsida samt källa och innehållshash för varje post
 - kan synkronisera den senast kända sidans svans och nya sidor idempotent
 - normaliserar länkar och visar domän, unika URL:er och unika länkande användare
+- delar trådar deterministiskt i kronologiska analyssegment
 - visar deltagarstatistik, topplista, Top-10-andel, Gini och HHI
 - har tomma men färdiga tabeller för kommande stance/opinionsanalys
 
@@ -77,6 +78,16 @@ Visa normaliserad länkanvändning per domän:
 ```bash
 fb links t3322511
 ```
+
+Bygg och visa analyssegment (75 inlägg som standard):
+
+```bash
+fb segments t3322511
+```
+
+Segmentgränser och medlemskap lagras separat från rådata i `segments` och
+`segment_posts`. Segmentens sammanfattning är avsiktligt tom tills en
+versionshanterad analysleverantör införs.
 
 ## Datamodell
 

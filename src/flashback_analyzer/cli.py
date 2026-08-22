@@ -11,6 +11,7 @@ from .database import Database
 from .fetcher import Fetcher
 from .parser import parse_thread_page
 from .segmentation import build_segments
+from .topics import discover_topics
 from .urls import parse_thread_ref
 
 app = typer.Typer(no_args_is_help=True, help="Read-only Flashback thread analyzer.")
@@ -131,6 +132,29 @@ def segments(
         table.add_column(name, justify="right" if name in {"Segment", "Första post", "Sista post", "Inlägg"} else "left")
     for row in rows:
         table.add_row(str(row.number), str(row.first_post_id), str(row.last_post_id), row.start_time or "?", row.end_time or "?", str(row.post_count))
+    console.print(table)
+
+
+@app.command()
+def topics(
+    thread: str = typer.Argument(...),
+    limit: int = typer.Option(10, min=1, max=100),
+    min_posts: int = typer.Option(2, min=1, help="Minimum number of posts containing a topic term."),
+    db: Path = typer.Option(DEFAULT_DB),
+) -> None:
+    """Discover recurring lexical topic candidates and their post counts."""
+    ref = parse_thread_ref(thread)
+    with Database(db) as database:
+        try:
+            rows = discover_topics(database.conn, ref.thread_id, limit=limit, min_post_count=min_posts)
+        except KeyError:
+            raise typer.BadParameter("Tråden finns inte i databasen. Kör 'fb ingest' först.")
+    table = Table(title="Diskussionsämnen (lexikal baslinje)")
+    table.add_column("Ämne")
+    table.add_column("Inlägg", justify="right")
+    table.add_column("Konfidens", justify="right")
+    for row in rows:
+        table.add_row(row.label, str(row.post_count), f"{row.confidence:.1%}")
     console.print(table)
 
 

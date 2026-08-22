@@ -7,7 +7,7 @@ from pathlib import Path
 from .models import ParsedPage
 from .urls import normalize_url, thread_page_url, url_domain
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -82,6 +82,25 @@ CREATE TABLE IF NOT EXISTS segment_posts (
 );
 CREATE INDEX IF NOT EXISTS idx_segments_thread ON segments(thread_id);
 CREATE INDEX IF NOT EXISTS idx_segment_posts_post ON segment_posts(post_id);
+CREATE TABLE IF NOT EXISTS topics (
+    topic_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id INTEGER NOT NULL REFERENCES threads(thread_id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    method TEXT NOT NULL,
+    confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+    input_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(thread_id, label, method)
+);
+CREATE TABLE IF NOT EXISTS post_topics (
+    post_id INTEGER NOT NULL REFERENCES posts(post_id) ON DELETE CASCADE,
+    topic_id INTEGER NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE,
+    confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+    method TEXT NOT NULL,
+    PRIMARY KEY(post_id, topic_id, method)
+);
+CREATE INDEX IF NOT EXISTS idx_topics_thread ON topics(thread_id);
+CREATE INDEX IF NOT EXISTS idx_post_topics_topic ON post_topics(topic_id);
 """
 
 

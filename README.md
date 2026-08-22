@@ -89,6 +89,16 @@ Segmentgränser och medlemskap lagras separat från rådata i `segments` och
 `segment_posts`. Segmentens sammanfattning är avsiktligt tom tills en
 versionshanterad analysleverantör införs.
 
+Hitta återkommande ämneskandidater:
+
+```bash
+fb topics t3322511
+```
+
+Den första implementationen använder en konservativ, reproducerbar lexikal
+baslinje. Ämnena är kandidater och ska inte tolkas som färdiga frågor eller
+positioner.
+
 ## Datamodell
 
 ```text

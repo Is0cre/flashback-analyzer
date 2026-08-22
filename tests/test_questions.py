@@ -19,7 +19,7 @@ def test_explicit_questions_keep_evidence_mappings(tmp_path):
         assert rows[0].question == "Är polisens tidslinje rimlig?"
         assert rows[0].post_count == 2
         assert db.conn.execute("SELECT COUNT(*) FROM post_questions").fetchone()[0] == 2
-        assert db.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 6
+        assert db.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
 
 
 def test_questions_do_not_exist_for_unknown_thread(tmp_path):

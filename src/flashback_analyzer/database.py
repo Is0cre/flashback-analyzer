@@ -7,7 +7,7 @@ from pathlib import Path
 from .models import ParsedPage
 from .urls import normalize_url, thread_page_url, url_domain
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -130,6 +130,15 @@ CREATE TABLE IF NOT EXISTS discovery_items (
     PRIMARY KEY(feed, thread_id)
 );
 CREATE INDEX IF NOT EXISTS idx_discovery_items_fetched ON discovery_items(fetched_at);
+CREATE TABLE IF NOT EXISTS tracked_threads (
+    thread_id INTEGER PRIMARY KEY REFERENCES threads(thread_id) ON DELETE CASCADE,
+    added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS reader_state (
+    thread_id INTEGER PRIMARY KEY REFERENCES threads(thread_id) ON DELETE CASCADE,
+    last_seen_post_id INTEGER,
+    last_seen_at TEXT
+);
 """
 
 
@@ -161,6 +170,8 @@ class Database:
         elif int(row[0]) < SCHEMA_VERSION:
             self.conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
         self.conn.commit()
+        self.conn.execute("INSERT OR IGNORE INTO tracked_threads(thread_id) SELECT thread_id FROM threads")
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -180,6 +191,7 @@ class Database:
             forum_name=COALESCE(excluded.forum_name, threads.forum_name),
             last_page_seen=MAX(threads.last_page_seen, excluded.last_page_seen), page_count=MAX(threads.page_count, excluded.page_count),
             updated_at=CURRENT_TIMESTAMP""", (parsed.thread_id, parsed.title, f"https://www.flashback.org/t{parsed.thread_id}", parsed.forum_name, parsed.max_page, parsed.max_page))
+        cur.execute("INSERT OR IGNORE INTO tracked_threads(thread_id) VALUES (?)", (parsed.thread_id,))
         if parsed.raw_html is not None:
             cur.execute("""INSERT INTO raw_pages(thread_id, page, source_url, content_hash, raw_html) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(thread_id, page) DO UPDATE SET source_url=excluded.source_url, content_hash=excluded.content_hash,
@@ -256,3 +268,28 @@ class Database:
             FROM discovery_items GROUP BY thread_id) latest ON latest.thread_id=d.thread_id AND latest.fetched_at=d.fetched_at
             ORDER BY d.feed, d.replies DESC, d.readers DESC, d.thread_id""").fetchall()
         return [DiscoveryItem(row["feed"], row["thread_id"], row["title"], row["views"], row["readers"], row["replies"]) for row in rows]
+
+    def tracked_thread_rows(self) -> list[sqlite3.Row]:
+        return self.conn.execute("""SELECT t.thread_id, t.title, t.forum_name, t.post_count, t.last_fetched_at,
+            (SELECT COUNT(*) FROM posts p2 WHERE p2.thread_id=t.thread_id AND
+                (rs.last_seen_post_id IS NULL OR p2.post_id > rs.last_seen_post_id)) AS unread_count,
+            rs.last_seen_post_id FROM tracked_threads tt JOIN threads t ON t.thread_id=tt.thread_id
+            LEFT JOIN reader_state rs ON rs.thread_id=t.thread_id ORDER BY t.last_fetched_at DESC, t.thread_id""").fetchall()
+
+    def thread_posts(self, thread_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute("""SELECT p.post_id, p.ordinal, p.page, p.position_on_page, p.posted_at,
+            p.text, p.raw_text, u.username FROM posts p JOIN users u ON u.user_id=p.user_id
+            WHERE p.thread_id=? ORDER BY COALESCE(p.posted_at, ''), COALESCE(p.ordinal, p.post_id), p.post_id""", (thread_id,)).fetchall()
+
+    def post_quotes(self, post_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute("""SELECT quoted_post_id, quoted_author, quote_text FROM quotes
+            WHERE post_id=? ORDER BY quote_id""", (post_id,)).fetchall()
+
+    def reader_position(self, thread_id: int) -> int | None:
+        row = self.conn.execute("SELECT last_seen_post_id FROM reader_state WHERE thread_id=?", (thread_id,)).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def mark_post_seen(self, thread_id: int, post_id: int) -> None:
+        self.conn.execute("""INSERT INTO reader_state(thread_id, last_seen_post_id, last_seen_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(thread_id) DO UPDATE SET last_seen_post_id=excluded.last_seen_post_id, last_seen_at=CURRENT_TIMESTAMP""", (thread_id, post_id))
+        self.conn.commit()

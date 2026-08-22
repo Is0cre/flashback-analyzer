@@ -12,14 +12,21 @@ from .fetcher import Fetcher
 from .parser import parse_thread_page
 from .segmentation import build_segments
 from .topics import discover_topics
-from .tui import run_tui
+from .textual_app import launch_textual_tui
 from .questions import discover_questions
 from .urls import parse_thread_ref
 
-app = typer.Typer(no_args_is_help=True, help="Read-only Flashback thread analyzer.")
+app = typer.Typer(no_args_is_help=False, help="Read-only Flashback thread analyzer.")
 console = Console()
 DEFAULT_DB = Path("data/flashback.sqlite3")
 DEFAULT_CACHE = Path("data/cache")
+
+
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
+    """Open the local reader when no subcommand is provided."""
+    if ctx.invoked_subcommand is None:
+        launch_textual_tui(DEFAULT_DB)
 
 
 @app.command()
@@ -184,13 +191,13 @@ def questions(
 
 
 @app.command()
-def tui(thread: str | None = typer.Argument(None, help="Kompakt trådref, t.ex. t3742384C. Utelämna för trådlistan."), db: Path = typer.Option(DEFAULT_DB), cache: Path = typer.Option(DEFAULT_CACHE, help="HTML-cache för nya hämtningar."), logo: bool = typer.Option(False, "--logo/--no-logo", help="Visa ANSI-logotypen i TUI:t.")) -> None:
-    """Open a navigable terminal browser and thread workspace."""
+def tui(thread: str | None = typer.Argument(None, help="Kompakt trådref, t.ex. t3742384C."), db: Path = typer.Option(DEFAULT_DB)) -> None:
+    """Open the Textual terminal reader."""
     ref = parse_thread_ref(thread) if thread else None
     with Database(db) as database:
         if ref and not database.conn.execute("SELECT 1 FROM threads WHERE thread_id=?", (ref.thread_id,)).fetchone():
             raise typer.BadParameter("Tråden finns inte i databasen. Kör 'fb ingest' först.")
-        run_tui(database, ref.thread_id if ref else None, cache_dir=cache, show_logo=logo, console=console)
+    launch_textual_tui(db, initial_thread=ref.thread_id if ref else None)
 
 
 @app.command()

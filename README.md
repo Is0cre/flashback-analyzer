@@ -31,6 +31,15 @@ pytest -q
 
 ## Första körningen
 
+Starta den lokala terminal-läsaren direkt:
+
+```bash
+fb
+```
+
+Den öppnar redan lagrade trådar utan nätverk. `fb tui t<ID>` är en explicit
+alternativ start med en viss tråd.
+
 Hämta första sidan:
 
 ```bash
@@ -113,6 +122,9 @@ En liten interaktiv terminalvy finns också:
 ```bash
 fb tui t3742384C
 ```
+
+`fb` utan subkommando öppnar den lokala Textual-läsaren direkt. Den kräver
+ingen nätverksanslutning för att läsa redan lagrade trådar.
 
 Utan trådargument öppnas trådlistan. Där kan du lägga till en ny tråd, ange
 antal sidor att hämta eller välja att hämta alla upptäckta sidor:

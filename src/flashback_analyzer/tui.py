@@ -202,9 +202,10 @@ def _workspace_menu(console: Console, database: Database, logo: Text | None, liv
         table.add_column("Visningar", justify="right")
         table.add_column("Läsare", justify="right")
         table.add_column("Svar", justify="right")
-        for index, item in enumerate(live_items[:40], start=1):
+        for index, item in enumerate(live_items[:20], start=1):
             table.add_row(str(index), item.feed, f"t{item.thread_id} · {item.title[:90]}", *(str(value) if value is not None else "?" for value in (item.views, item.readers, item.replies)))
-            choices.append((str(index), item))
+            replies = f" · {item.replies:,} svar" if item.replies is not None else ""
+            choices.append((f"{index}. {item.feed} · t{item.thread_id} · {item.title[:72]}{replies}", item))
         console.print(table)
     rows = database.conn.execute("SELECT thread_id, title, post_count FROM threads ORDER BY last_fetched_at DESC, thread_id").fetchall()
     if rows:
@@ -215,7 +216,7 @@ def _workspace_menu(console: Console, database: Database, logo: Text | None, liv
         offset = len(choices)
         for index, row in enumerate(rows, start=offset + 1):
             table.add_row(str(index), f"t{row['thread_id']} · {row['title'] or 'utan titel'}", f"{row['post_count']:,}")
-            choices.append((str(index), int(row["thread_id"])))
+            choices.append((f"{index}. t{row['thread_id']} · {(row['title'] or 'utan titel')[:80]} · {row['post_count']:,} inlägg", int(row["thread_id"])))
         console.print(table)
     else:
         console.print("[dim]Inga trådar ännu.[/]")

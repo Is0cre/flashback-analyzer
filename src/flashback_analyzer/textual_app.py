@@ -172,12 +172,15 @@ class FlashbackApp(App[None]):
 
     def _refresh_navigation(self, section_id: int | None) -> None:
         try:
-            if self.navigation is None:
-                return
-            if section_id is None:
-                self.navigation.refresh()
-            else:
-                self.navigation.refresh_forum(section_id, force=True)
+            # SQLite connections are thread-affine. The Textual worker must
+            # use its own connection; only the completion callback touches
+            # the UI-owned database/service again.
+            with Database(self.db_path) as database:
+                service = NavigationService(database, self.db_path.parent / "cache")
+                if section_id is None:
+                    service.refresh()
+                else:
+                    service.refresh_forum(section_id, force=True)
             self.call_from_thread(self._load_forum_level)
         except Exception as exc:
             self.call_from_thread(self.notify, f"Navigation refresh failed; cached data remains available: {exc}", severity="warning")

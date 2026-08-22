@@ -7,7 +7,7 @@ from pathlib import Path
 from .models import ParsedPage
 from .urls import normalize_url, thread_page_url, url_domain
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -101,6 +101,23 @@ CREATE TABLE IF NOT EXISTS post_topics (
 );
 CREATE INDEX IF NOT EXISTS idx_topics_thread ON topics(thread_id);
 CREATE INDEX IF NOT EXISTS idx_post_topics_topic ON post_topics(topic_id);
+CREATE TABLE IF NOT EXISTS question_options (
+    option_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    question_id INTEGER NOT NULL REFERENCES questions(question_id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    method TEXT NOT NULL,
+    confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+    UNIQUE(question_id, label, method)
+);
+CREATE TABLE IF NOT EXISTS post_questions (
+    post_id INTEGER NOT NULL REFERENCES posts(post_id) ON DELETE CASCADE,
+    question_id INTEGER NOT NULL REFERENCES questions(question_id) ON DELETE CASCADE,
+    confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+    method TEXT NOT NULL,
+    PRIMARY KEY(post_id, question_id, method)
+);
+CREATE INDEX IF NOT EXISTS idx_questions_thread ON questions(thread_id);
+CREATE INDEX IF NOT EXISTS idx_post_questions_question ON post_questions(question_id);
 """
 
 
@@ -119,6 +136,7 @@ class Database:
             "posts": {"position_on_page": "INTEGER", "source_url": "TEXT", "content_hash": "TEXT"},
             "links": {"domain": "TEXT NOT NULL DEFAULT ''", "author": "TEXT", "posted_at": "TEXT"},
             "stances": {"prompt_version": "TEXT", "analysis_version": "TEXT", "input_hash": "TEXT"},
+            "questions": {"method": "TEXT NOT NULL DEFAULT 'manual'", "confidence": "REAL NOT NULL DEFAULT 1.0", "input_hash": "TEXT"},
         }
         for table, columns in migrations.items():
             existing = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}

@@ -99,6 +99,15 @@ Den första implementationen använder en konservativ, reproducerbar lexikal
 baslinje. Ämnena är kandidater och ska inte tolkas som färdiga frågor eller
 positioner.
 
+Frågekandidater från uttryckliga frågetecken kan visas med:
+
+```bash
+fb questions t3742384C
+```
+
+Detta lager återger bara frågor som faktiskt skrivits i inläggen. Det fyller
+inte i svarsalternativ eller tolkar en fråga som en ståndpunkt.
+
 En liten interaktiv terminalvy finns också:
 
 ```bash

@@ -56,6 +56,19 @@ def _segments(console: Console, conn: sqlite3.Connection, thread_id: int) -> Non
     console.print(table if rows else "[dim]Kör fb segments först för att skapa segment.[/]")
 
 
+def _questions(console: Console, conn: sqlite3.Connection, thread_id: int) -> None:
+    rows = conn.execute("""SELECT q.question, COUNT(pq.post_id) AS posts, q.confidence
+        FROM questions q LEFT JOIN post_questions pq ON pq.question_id=q.question_id
+        WHERE q.thread_id=? GROUP BY q.question_id ORDER BY posts DESC, q.question LIMIT 20""", (thread_id,)).fetchall()
+    table = Table(title="Frågekandidater")
+    table.add_column("Fråga")
+    table.add_column("Inlägg", justify="right")
+    table.add_column("Konfidens", justify="right")
+    for row in rows:
+        table.add_row(row["question"], str(row["posts"]), f"{row['confidence']:.1%}")
+    console.print(table if rows else "[dim]Kör fb questions först för att upptäcka frågor.[/]")
+
+
 def _links(console: Console, conn: sqlite3.Connection, thread_id: int) -> None:
     rows = conn.execute("""SELECT l.domain, COUNT(*) AS links, COUNT(DISTINCT l.url) AS urls,
         COUNT(DISTINCT p.user_id) AS users FROM links l JOIN posts p ON p.post_id=l.post_id
@@ -77,8 +90,8 @@ def run_tui(conn: sqlite3.Connection, thread_id: int, *, console: Console | None
         if logo is not None:
             output.print(logo, crop=True, overflow="crop")
         _overview(output, conn, thread_id)
-        output.print("\n[bold]1[/] Översikt  [bold]2[/] Ämnen  [bold]3[/] Segment  [bold]4[/] Länkar  [bold]q[/] Avsluta")
-        choice = Prompt.ask("Val", choices=["1", "2", "3", "4", "q"], default="1", console=output)
+        output.print("\n[bold]1[/] Översikt  [bold]2[/] Ämnen  [bold]3[/] Segment  [bold]4[/] Frågor  [bold]5[/] Länkar  [bold]q[/] Avsluta")
+        choice = Prompt.ask("Val", choices=["1", "2", "3", "4", "5", "q"], default="1", console=output)
         if choice == "q":
             return
         output.clear()
@@ -87,6 +100,8 @@ def run_tui(conn: sqlite3.Connection, thread_id: int, *, console: Console | None
         elif choice == "3":
             _segments(output, conn, thread_id)
         elif choice == "4":
+            _questions(output, conn, thread_id)
+        elif choice == "5":
             _links(output, conn, thread_id)
         else:
             _overview(output, conn, thread_id)

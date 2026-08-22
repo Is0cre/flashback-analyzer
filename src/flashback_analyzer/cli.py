@@ -13,6 +13,7 @@ from .parser import parse_thread_page
 from .segmentation import build_segments
 from .topics import discover_topics
 from .tui import run_tui
+from .questions import discover_questions
 from .urls import parse_thread_ref
 
 app = typer.Typer(no_args_is_help=True, help="Read-only Flashback thread analyzer.")
@@ -156,6 +157,29 @@ def topics(
     table.add_column("Konfidens", justify="right")
     for row in rows:
         table.add_row(row.label, str(row.post_count), f"{row.confidence:.1%}")
+    console.print(table)
+
+
+@app.command()
+def questions(
+    thread: str = typer.Argument(...),
+    limit: int = typer.Option(20, min=1, max=100),
+    min_posts: int = typer.Option(1, min=1, help="Minimum number of posts containing the question."),
+    db: Path = typer.Option(DEFAULT_DB),
+) -> None:
+    """Discover explicit question candidates and their post counts."""
+    ref = parse_thread_ref(thread)
+    with Database(db) as database:
+        try:
+            rows = discover_questions(database.conn, ref.thread_id, limit=limit, min_post_count=min_posts)
+        except KeyError:
+            raise typer.BadParameter("Tråden finns inte i databasen. Kör 'fb ingest' först.")
+    table = Table(title="Frågekandidater (explicit text)")
+    table.add_column("Fråga")
+    table.add_column("Inlägg", justify="right")
+    table.add_column("Konfidens", justify="right")
+    for row in rows:
+        table.add_row(row.question, str(row.post_count), f"{row.confidence:.1%}")
     console.print(table)
 
 

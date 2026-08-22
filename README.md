@@ -114,6 +114,13 @@ En liten interaktiv terminalvy finns också:
 fb tui t3742384C
 ```
 
+Utan trådargument öppnas trådlistan. Där kan du lägga till en ny tråd, ange
+antal sidor att hämta eller välja att hämta alla upptäckta sidor:
+
+```bash
+fb tui
+```
+
 The TUI displays the repository ANSI logo from `assets/ansi-art.utf.ans`
 when available.
 

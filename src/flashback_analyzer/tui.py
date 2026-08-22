@@ -4,22 +4,32 @@ import sqlite3
 from pathlib import Path
 
 from rich.console import Console
-from rich.prompt import Prompt
-from rich.text import Text
+from rich.prompt import Confirm, Prompt
 from rich.table import Table
+from rich.text import Text
+
+from .database import Database
+from .fetcher import Fetcher
+from .parser import parse_thread_page
+from .questions import discover_questions
+from .segmentation import build_segments
+from .topics import discover_topics
+from .urls import parse_thread_ref
 
 
 def _logo() -> Text | None:
-    """Load the optional repository logo without making the TUI depend on it."""
-    candidates = (
-        Path("assets/ansi-art.utf.ans"),
-        Path("ansi-art.utf.ans"),
-        Path(__file__).resolve().parents[2] / "assets" / "ansi-art.utf.ans",
-    )
+    candidates = (Path("assets/ansi-art.utf.ans"), Path("ansi-art.utf.ans"), Path(__file__).resolve().parents[2] / "assets" / "ansi-art.utf.ans")
     for path in candidates:
         if path.is_file():
             return Text.from_ansi(path.read_text(encoding="utf-8"))
     return None
+
+
+def _clear_header(console: Console, logo: Text | None, title: str) -> None:
+    console.clear()
+    if logo is not None:
+        console.print(logo, crop=True, overflow="crop")
+    console.rule(f"[bold]{title}[/]")
 
 
 def _overview(console: Console, conn: sqlite3.Connection, thread_id: int) -> None:
@@ -29,13 +39,13 @@ def _overview(console: Console, conn: sqlite3.Connection, thread_id: int) -> Non
         return
     users = conn.execute("SELECT COUNT(DISTINCT user_id) FROM posts WHERE thread_id=?", (thread_id,)).fetchone()[0]
     console.print(f"[bold]{row['title'] or f't{thread_id}'}[/]")
-    console.print(f"Inlägg: {row['post_count']:,}   Användare: {users:,}   Sidor: {row['page_count']}")
+    console.print(f"Tråd: t{thread_id}   Inlägg: {row['post_count']:,}   Användare: {users:,}   Sidor: {row['page_count']}")
 
 
 def _topics(console: Console, conn: sqlite3.Connection, thread_id: int) -> None:
-    rows = conn.execute("""SELECT label, COUNT(pt.post_id) AS posts, confidence
-        FROM topics t LEFT JOIN post_topics pt ON pt.topic_id=t.topic_id
-        WHERE t.thread_id=? GROUP BY t.topic_id ORDER BY posts DESC, label LIMIT 20""", (thread_id,)).fetchall()
+    rows = conn.execute("""SELECT label, COUNT(pt.post_id) AS posts, confidence FROM topics t
+        LEFT JOIN post_topics pt ON pt.topic_id=t.topic_id WHERE t.thread_id=?
+        GROUP BY t.topic_id ORDER BY posts DESC, label LIMIT 20""", (thread_id,)).fetchall()
     table = Table(title="Ämneskandidater")
     table.add_column("Ämne")
     table.add_column("Inlägg", justify="right")
@@ -43,6 +53,19 @@ def _topics(console: Console, conn: sqlite3.Connection, thread_id: int) -> None:
     for row in rows:
         table.add_row(row["label"], str(row["posts"]), f"{row['confidence']:.1%}")
     console.print(table if rows else "[dim]Kör fb topics först för att upptäcka ämnen.[/]")
+
+
+def _questions(console: Console, conn: sqlite3.Connection, thread_id: int) -> None:
+    rows = conn.execute("""SELECT q.question, COUNT(pq.post_id) AS posts, q.confidence FROM questions q
+        LEFT JOIN post_questions pq ON pq.question_id=q.question_id WHERE q.thread_id=?
+        GROUP BY q.question_id ORDER BY posts DESC, q.question LIMIT 20""", (thread_id,)).fetchall()
+    table = Table(title="Frågekandidater")
+    table.add_column("Fråga")
+    table.add_column("Inlägg", justify="right")
+    table.add_column("Konfidens", justify="right")
+    for row in rows:
+        table.add_row(row["question"], str(row["posts"]), f"{row['confidence']:.1%}")
+    console.print(table if rows else "[dim]Kör fb questions först för att upptäcka frågor.[/]")
 
 
 def _segments(console: Console, conn: sqlite3.Connection, thread_id: int) -> None:
@@ -54,19 +77,6 @@ def _segments(console: Console, conn: sqlite3.Connection, thread_id: int) -> Non
     for row in rows:
         table.add_row(str(row["segment_number"]), str(row["first_post_id"]), str(row["last_post_id"]), str(row["post_count"]), row["start_time"] or "?", row["end_time"] or "?")
     console.print(table if rows else "[dim]Kör fb segments först för att skapa segment.[/]")
-
-
-def _questions(console: Console, conn: sqlite3.Connection, thread_id: int) -> None:
-    rows = conn.execute("""SELECT q.question, COUNT(pq.post_id) AS posts, q.confidence
-        FROM questions q LEFT JOIN post_questions pq ON pq.question_id=q.question_id
-        WHERE q.thread_id=? GROUP BY q.question_id ORDER BY posts DESC, q.question LIMIT 20""", (thread_id,)).fetchall()
-    table = Table(title="Frågekandidater")
-    table.add_column("Fråga")
-    table.add_column("Inlägg", justify="right")
-    table.add_column("Konfidens", justify="right")
-    for row in rows:
-        table.add_row(row["question"], str(row["posts"]), f"{row['confidence']:.1%}")
-    console.print(table if rows else "[dim]Kör fb questions först för att upptäcka frågor.[/]")
 
 
 def _links(console: Console, conn: sqlite3.Connection, thread_id: int) -> None:
@@ -81,29 +91,131 @@ def _links(console: Console, conn: sqlite3.Connection, thread_id: int) -> None:
     console.print(table if rows else "[dim]Inga länkar lagrade.[/]")
 
 
-def run_tui(conn: sqlite3.Connection, thread_id: int, *, console: Console | None = None) -> None:
-    """Run a small read-only terminal browser over stored analysis data."""
+def _pause(console: Console) -> None:
+    Prompt.ask("Enter för att återgå", default="", console=console)
+
+
+def _page_options(console: Console, *, default_pages: int = 1) -> tuple[int, bool]:
+    while True:
+        raw = Prompt.ask("Antal sidor att hämta", default=str(default_pages), console=console)
+        try:
+            pages = int(raw)
+            if pages < 1:
+                raise ValueError
+            break
+        except ValueError:
+            console.print("[red]Ange ett positivt heltal.[/]")
+    return pages, Confirm.ask("Upptäck och hämta alla sidor?", default=False, console=console)
+
+
+def _ingest(database: Database, cache_dir: Path, value: str, console: Console) -> int:
+    ref = parse_thread_ref(value)
+    pages, all_pages = _page_options(console)
+    stored = 0
+    with Fetcher(cache_dir) as fetcher:
+        first_html = fetcher.fetch_thread_page(ref.thread_id, ref.page)
+        first = parse_thread_page(first_html, ref.thread_id, ref.page, source_url=ref.canonical_url)
+        stored += database.store_page(first)
+        page_numbers = [p for p in range(1, first.max_page + 1) if p != ref.page] if all_pages else range(ref.page + 1, ref.page + pages)
+        for page in page_numbers:
+            html = fetcher.fetch_thread_page(ref.thread_id, page)
+            parsed = parse_thread_page(html, ref.thread_id, page, source_url=f"https://www.flashback.org/t{ref.thread_id}{f'p{page}' if page != 1 else ''}")
+            stored += database.store_page(parsed)
+    console.print(f"[green]Hämtat:[/] {stored} inlägg")
+    return ref.thread_id
+
+
+def _sync(database: Database, cache_dir: Path, thread_id: int, console: Console) -> None:
+    row = database.conn.execute("SELECT MAX(page) AS page FROM posts WHERE thread_id=?", (thread_id,)).fetchone()
+    last_page = max(1, int(row["page"] or 1))
+    with Fetcher(cache_dir) as fetcher:
+        html = fetcher.fetch_thread_page(thread_id, last_page, refresh=True)
+        parsed = parse_thread_page(html, thread_id, last_page, source_url=f"https://www.flashback.org/t{thread_id}{f'p{last_page}' if last_page != 1 else ''}")
+        database.store_page(parsed)
+        for page in range(last_page + 1, parsed.max_page + 1):
+            html = fetcher.fetch_thread_page(thread_id, page)
+            database.store_page(parse_thread_page(html, thread_id, page, source_url=f"https://www.flashback.org/t{thread_id}p{page}"))
+    console.print(f"[green]Synkroniserad:[/] från sida {last_page}")
+
+
+def _workspace_menu(console: Console, database: Database, logo: Text | None) -> int | None | str:
+    _clear_header(console, logo, "Flashback Analyzer · Trådar")
+    rows = database.conn.execute("SELECT thread_id, title, post_count FROM threads ORDER BY last_fetched_at DESC, thread_id").fetchall()
+    if rows:
+        table = Table(title="Sparade trådar")
+        table.add_column("Val", justify="right")
+        table.add_column("Tråd")
+        table.add_column("Inlägg", justify="right")
+        for index, row in enumerate(rows, start=1):
+            table.add_row(str(index), f"t{row['thread_id']} · {row['title'] or 'utan titel'}", f"{row['post_count']:,}")
+        console.print(table)
+    else:
+        console.print("[dim]Inga trådar ännu.[/]")
+    choices = [str(index) for index in range(1, len(rows) + 1)] + ["a", "q"]
+    choice = Prompt.ask("[a] Lägg till tråd · [q] Avsluta", choices=choices, console=console)
+    if choice == "a":
+        return "add"
+    if choice == "q":
+        return "quit"
+    return int(rows[int(choice) - 1]["thread_id"])
+
+
+def _thread_menu(console: Console, database: Database, cache_dir: Path, logo: Text | None, thread_id: int) -> int | None | str:
+    _clear_header(console, logo, f"Flashback Analyzer · t{thread_id}")
+    _overview(console, database.conn, thread_id)
+    console.print("\n[bold]1[/] Översikt  [bold]2[/] Ämnen  [bold]3[/] Frågor  [bold]4[/] Segment  [bold]5[/] Länkar")
+    console.print("[bold]6[/] Hämta sidor  [bold]7[/] Synka svansen  [bold]a[/] Lägg till tråd  [bold]b[/] Trådlista  [bold]q[/] Avsluta")
+    choice = Prompt.ask("Val", choices=["1", "2", "3", "4", "5", "6", "7", "a", "b", "q"], default="1", console=console)
+    if choice == "q":
+        return "quit"
+    if choice == "b":
+        return None
+    if choice == "a":
+        return "add"
+    if choice == "6":
+        _ingest(database, cache_dir, f"t{thread_id}", console)
+        _pause(console)
+        return thread_id
+    if choice == "7":
+        _sync(database, cache_dir, thread_id, console)
+        _pause(console)
+        return thread_id
+    console.clear()
+    if choice == "2":
+        discover_topics(database.conn, thread_id)
+        _topics(console, database.conn, thread_id)
+    elif choice == "3":
+        discover_questions(database.conn, thread_id)
+        _questions(console, database.conn, thread_id)
+    elif choice == "4":
+        build_segments(database.conn, thread_id)
+        _segments(console, database.conn, thread_id)
+    elif choice == "5":
+        _links(console, database.conn, thread_id)
+    else:
+        _overview(console, database.conn, thread_id)
+    _pause(console)
+    return thread_id
+
+
+def run_tui(database: Database, thread_id: int | None = None, *, cache_dir: Path = Path("data/cache"), console: Console | None = None) -> None:
+    """Run a clear, navigable terminal browser with thread management."""
     output = console or Console()
     logo = _logo()
+    selected: int | None | str = thread_id
     while True:
-        output.clear()
-        if logo is not None:
-            output.print(logo, crop=True, overflow="crop")
-        _overview(output, conn, thread_id)
-        output.print("\n[bold]1[/] Översikt  [bold]2[/] Ämnen  [bold]3[/] Segment  [bold]4[/] Frågor  [bold]5[/] Länkar  [bold]q[/] Avsluta")
-        choice = Prompt.ask("Val", choices=["1", "2", "3", "4", "5", "q"], default="1", console=output)
-        if choice == "q":
+        if selected == "quit":
             return
-        output.clear()
-        if choice == "2":
-            _topics(output, conn, thread_id)
-        elif choice == "3":
-            _segments(output, conn, thread_id)
-        elif choice == "4":
-            _questions(output, conn, thread_id)
-        elif choice == "5":
-            _links(output, conn, thread_id)
+        if selected == "add":
+            _clear_header(output, logo, "Flashback Analyzer · Lägg till tråd")
+            value = Prompt.ask("Tråd (t<ID> eller URL)", console=output)
+            try:
+                selected = _ingest(database, cache_dir, value, output)
+            except (ValueError, OSError) as exc:
+                output.print(f"[red]Kunde inte hämta tråden: {exc}[/]")
+                _pause(output)
+            continue
+        if selected is None:
+            selected = _workspace_menu(output, database, logo)
         else:
-            _overview(output, conn, thread_id)
-        if Prompt.ask("Tryck Enter för menyn", default="", console=output) == "__quit__":
-            return
+            selected = _thread_menu(output, database, cache_dir, logo, selected)

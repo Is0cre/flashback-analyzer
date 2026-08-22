@@ -184,13 +184,13 @@ def questions(
 
 
 @app.command()
-def tui(thread: str = typer.Argument(..., help="Kompakt trådref, t.ex. t3742384C."), db: Path = typer.Option(DEFAULT_DB)) -> None:
-    """Open a small read-only terminal browser for a thread."""
-    ref = parse_thread_ref(thread)
+def tui(thread: str | None = typer.Argument(None, help="Kompakt trådref, t.ex. t3742384C. Utelämna för trådlistan."), db: Path = typer.Option(DEFAULT_DB), cache: Path = typer.Option(DEFAULT_CACHE, help="HTML-cache för nya hämtningar.")) -> None:
+    """Open a navigable terminal browser and thread workspace."""
+    ref = parse_thread_ref(thread) if thread else None
     with Database(db) as database:
-        if not database.conn.execute("SELECT 1 FROM threads WHERE thread_id=?", (ref.thread_id,)).fetchone():
+        if ref and not database.conn.execute("SELECT 1 FROM threads WHERE thread_id=?", (ref.thread_id,)).fetchone():
             raise typer.BadParameter("Tråden finns inte i databasen. Kör 'fb ingest' först.")
-        run_tui(database.conn, ref.thread_id, console=console)
+        run_tui(database, ref.thread_id if ref else None, cache_dir=cache, console=console)
 
 
 @app.command()

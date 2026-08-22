@@ -99,6 +99,15 @@ Den första implementationen använder en konservativ, reproducerbar lexikal
 baslinje. Ämnena är kandidater och ska inte tolkas som färdiga frågor eller
 positioner.
 
+En liten interaktiv terminalvy finns också:
+
+```bash
+fb tui t3742384C
+```
+
+Alla kommandon accepterar korta referenser som `t3742384C`; fullständig
+`https://www.flashback.org/`-URL behövs inte.
+
 ## Datamodell
 
 ```text

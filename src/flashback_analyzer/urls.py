@@ -4,7 +4,9 @@ import re
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-THREAD_RE = re.compile(r"(?:https?://(?:www\.)?flashback\.org/)?t(?P<thread>\d+)(?:p(?P<page>\d+))?", re.I)
+# Flashback links are often copied with a trailing ``C`` marker. It is not
+# part of the numeric thread ID and is accepted for convenient CLI use.
+THREAD_RE = re.compile(r"(?:https?://(?:www\.)?flashback\.org/)?t(?P<thread>\d+)(?:c)?(?:p(?P<page>\d+))?", re.I)
 
 
 @dataclass(frozen=True, slots=True)

@@ -7,6 +7,12 @@ def test_parse_thread_url():
     assert ref.page == 2
 
 
+def test_parse_compact_thread_ref_with_copy_marker():
+    ref = parse_thread_ref("t3742384C")
+    assert ref.thread_id == 3742384
+    assert ref.page == 1
+
+
 def test_page_url():
     assert thread_page_url(123, 1) == "https://www.flashback.org/t123"
     assert thread_page_url(123, 4) == "https://www.flashback.org/t123p4"

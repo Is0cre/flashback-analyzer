@@ -12,6 +12,7 @@ from .fetcher import Fetcher
 from .parser import parse_thread_page
 from .segmentation import build_segments
 from .topics import discover_topics
+from .tui import run_tui
 from .urls import parse_thread_ref
 
 app = typer.Typer(no_args_is_help=True, help="Read-only Flashback thread analyzer.")
@@ -156,6 +157,16 @@ def topics(
     for row in rows:
         table.add_row(row.label, str(row.post_count), f"{row.confidence:.1%}")
     console.print(table)
+
+
+@app.command()
+def tui(thread: str = typer.Argument(..., help="Kompakt trådref, t.ex. t3742384C."), db: Path = typer.Option(DEFAULT_DB)) -> None:
+    """Open a small read-only terminal browser for a thread."""
+    ref = parse_thread_ref(thread)
+    with Database(db) as database:
+        if not database.conn.execute("SELECT 1 FROM threads WHERE thread_id=?", (ref.thread_id,)).fetchone():
+            raise typer.BadParameter("Tråden finns inte i databasen. Kör 'fb ingest' först.")
+        run_tui(database.conn, ref.thread_id, console=console)
 
 
 @app.command()

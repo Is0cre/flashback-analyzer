@@ -96,9 +96,11 @@ def _pause(console: Console) -> None:
     Prompt.ask("Enter för att återgå", default="", console=console)
 
 
-def _page_options(console: Console, *, default_pages: int = 1) -> tuple[int, bool]:
+def _page_options(console: Console, *, default_pages: int = 1, reply_count: int | None = None) -> tuple[int, bool]:
+    estimate = f" · cirka {(reply_count + 1 + 19) // 20} sidor" if reply_count is not None else ""
+    reply_note = f" ({reply_count:,} svar{estimate})" if reply_count is not None else ""
     while True:
-        raw = Prompt.ask("Antal sidor att hämta", default=str(default_pages), console=console)
+        raw = Prompt.ask(f"Antal sidor att hämta{reply_note}", default=str(default_pages), console=console)
         try:
             pages = int(raw)
             if pages < 1:
@@ -106,12 +108,15 @@ def _page_options(console: Console, *, default_pages: int = 1) -> tuple[int, boo
             break
         except ValueError:
             console.print("[red]Ange ett positivt heltal.[/]")
-    return pages, Confirm.ask("Upptäck och hämta alla sidor?", default=False, console=console)
+    all_pages = Confirm.ask("Upptäck och hämta alla sidor?", default=False, console=console)
+    if all_pages and reply_count is not None and reply_count >= 1000:
+        all_pages = Confirm.ask(f"Tråden har {reply_count:,} svar. Hämta verkligen hela tråden?", default=False, console=console)
+    return pages, all_pages
 
 
-def _ingest(database: Database, cache_dir: Path, value: str, console: Console) -> int:
+def _ingest(database: Database, cache_dir: Path, value: str, console: Console, *, reply_count: int | None = None) -> int:
     ref = parse_thread_ref(value)
-    pages, all_pages = _page_options(console)
+    pages, all_pages = _page_options(console, reply_count=reply_count)
     stored = 0
     with Fetcher(cache_dir) as fetcher:
         first_html = fetcher.fetch_thread_page(ref.thread_id, ref.page)
@@ -147,11 +152,12 @@ def _workspace_menu(console: Console, database: Database, logo: Text | None, liv
         table.add_column("Val", justify="right")
         table.add_column("Källa")
         table.add_column("Tråd")
-        table.add_column("Aktivitet", justify="right")
+        table.add_column("Visningar", justify="right")
+        table.add_column("Läsare", justify="right")
+        table.add_column("Svar", justify="right")
         for index, item in enumerate(live_items[:40], start=1):
-            activity = f"{item.readers} läsare" if item.readers is not None else ""
-            table.add_row(str(index), item.feed, f"t{item.thread_id} · {item.title}", activity)
-            choices.append((str(index), f"feed:{item.thread_id}"))
+            table.add_row(str(index), item.feed, f"t{item.thread_id} · {item.title[:90]}", *(str(value) if value is not None else "?" for value in (item.views, item.readers, item.replies)))
+            choices.append((str(index), item))
         console.print(table)
     rows = database.conn.execute("SELECT thread_id, title, post_count FROM threads ORDER BY last_fetched_at DESC, thread_id").fetchall()
     if rows:
@@ -249,16 +255,15 @@ def run_tui(database: Database, thread_id: int | None = None, *, cache_dir: Path
                 _pause(output)
             selected = None
             continue
-        if isinstance(selected, str) and selected.startswith("feed:"):
-            # The numeric thread ID is encoded in the selection to avoid a second prompt.
-            feed_thread_id = int(selected.split(":", 1)[1])
-            if feed_thread_id:
-                _clear_header(output, logo, "Flashback Analyzer · Lägg till tråd")
-                try:
-                    selected = _ingest(database, cache_dir, f"t{feed_thread_id}", output)
-                except (ValueError, OSError) as exc:
-                    output.print(f"[red]Kunde inte hämta tråden: {exc}[/]")
-                    _pause(output)
+        if isinstance(selected, DiscoveryItem):
+            _clear_header(output, logo, "Flashback Analyzer · Lägg till tråd")
+            output.print(f"[bold]t{selected.thread_id} · {selected.title}[/]")
+            output.print(f"Visningar: {selected.views or '?'}   Läsare: {selected.readers or '?'}   Svar: {selected.replies or '?'}")
+            try:
+                selected = _ingest(database, cache_dir, f"t{selected.thread_id}", output, reply_count=selected.replies)
+            except (ValueError, OSError) as exc:
+                output.print(f"[red]Kunde inte hämta tråden: {exc}[/]")
+                _pause(output)
             continue
         if selected is None:
             selected = _workspace_menu(output, database, logo, live_items)

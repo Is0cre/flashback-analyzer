@@ -9,6 +9,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .database import Database
+from .discovery import DiscoveryItem, fetch_discovery_items
 from .fetcher import Fetcher
 from .parser import parse_thread_page
 from .questions import discover_questions
@@ -138,26 +139,41 @@ def _sync(database: Database, cache_dir: Path, thread_id: int, console: Console)
     console.print(f"[green]Synkroniserad:[/] från sida {last_page}")
 
 
-def _workspace_menu(console: Console, database: Database, logo: Text | None) -> int | None | str:
+def _workspace_menu(console: Console, database: Database, logo: Text | None, live_items: list[DiscoveryItem]) -> int | None | str:
     _clear_header(console, logo, "Flashback Analyzer · Trådar")
+    choices: list[tuple[str, int | str]] = []
+    if live_items:
+        table = Table(title="Live från Flashback")
+        table.add_column("Val", justify="right")
+        table.add_column("Källa")
+        table.add_column("Tråd")
+        table.add_column("Aktivitet", justify="right")
+        for index, item in enumerate(live_items[:40], start=1):
+            activity = f"{item.readers} läsare" if item.readers is not None else ""
+            table.add_row(str(index), item.feed, f"t{item.thread_id} · {item.title}", activity)
+            choices.append((str(index), f"feed:{item.thread_id}"))
+        console.print(table)
     rows = database.conn.execute("SELECT thread_id, title, post_count FROM threads ORDER BY last_fetched_at DESC, thread_id").fetchall()
     if rows:
         table = Table(title="Sparade trådar")
         table.add_column("Val", justify="right")
         table.add_column("Tråd")
         table.add_column("Inlägg", justify="right")
-        for index, row in enumerate(rows, start=1):
+        offset = len(choices)
+        for index, row in enumerate(rows, start=offset + 1):
             table.add_row(str(index), f"t{row['thread_id']} · {row['title'] or 'utan titel'}", f"{row['post_count']:,}")
+            choices.append((str(index), int(row["thread_id"])))
         console.print(table)
     else:
         console.print("[dim]Inga trådar ännu.[/]")
-    choices = [str(index) for index in range(1, len(rows) + 1)] + ["a", "q"]
-    choice = Prompt.ask("[a] Lägg till tråd · [q] Avsluta", choices=choices, console=console)
+    choice = Prompt.ask("[a] Lägg till tråd · [r] Uppdatera live · [q] Avsluta", choices=[value for value, _ in choices] + ["a", "r", "q"], console=console)
     if choice == "a":
         return "add"
     if choice == "q":
         return "quit"
-    return int(rows[int(choice) - 1]["thread_id"])
+    if choice == "r":
+        return "refresh"
+    return dict(choices)[choice]
 
 
 def _thread_menu(console: Console, database: Database, cache_dir: Path, logo: Text | None, thread_id: int) -> int | None | str:
@@ -202,6 +218,14 @@ def run_tui(database: Database, thread_id: int | None = None, *, cache_dir: Path
     """Run a clear, navigable terminal browser with thread management."""
     output = console or Console()
     logo = _logo() if show_logo else None
+    live_items: list[DiscoveryItem] = []
+    if thread_id is None:
+        output.print("[dim]Läser aktuella Flashback-trådar...[/]")
+        try:
+            with Fetcher(cache_dir) as fetcher:
+                live_items = fetch_discovery_items(fetcher)
+        except Exception as exc:
+            output.print(f"[yellow]Live-listan kunde inte hämtas: {exc}[/]")
     selected: int | None | str = thread_id
     while True:
         if selected == "quit":
@@ -215,7 +239,28 @@ def run_tui(database: Database, thread_id: int | None = None, *, cache_dir: Path
                 output.print(f"[red]Kunde inte hämta tråden: {exc}[/]")
                 _pause(output)
             continue
+        if selected == "refresh":
+            output.print("[dim]Uppdaterar live-listan...[/]")
+            try:
+                with Fetcher(cache_dir) as fetcher:
+                    live_items = fetch_discovery_items(fetcher, refresh=True)
+            except Exception as exc:
+                output.print(f"[yellow]Live-listan kunde inte hämtas: {exc}[/]")
+                _pause(output)
+            selected = None
+            continue
+        if isinstance(selected, str) and selected.startswith("feed:"):
+            # The numeric thread ID is encoded in the selection to avoid a second prompt.
+            feed_thread_id = int(selected.split(":", 1)[1])
+            if feed_thread_id:
+                _clear_header(output, logo, "Flashback Analyzer · Lägg till tråd")
+                try:
+                    selected = _ingest(database, cache_dir, f"t{feed_thread_id}", output)
+                except (ValueError, OSError) as exc:
+                    output.print(f"[red]Kunde inte hämta tråden: {exc}[/]")
+                    _pause(output)
+            continue
         if selected is None:
-            selected = _workspace_menu(output, database, logo)
+            selected = _workspace_menu(output, database, logo, live_items)
         else:
             selected = _thread_menu(output, database, cache_dir, logo, selected)

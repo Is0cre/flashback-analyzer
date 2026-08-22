@@ -44,6 +44,10 @@ class Fetcher:
 
     def fetch_thread_page(self, thread_id: int, page: int, *, refresh: bool = False) -> str:
         url = thread_page_url(thread_id, page)
+        return self.fetch_url(url, refresh=refresh)
+
+    def fetch_url(self, url: str, *, refresh: bool = False) -> str:
+        """Fetch any read-only Flashback HTML page through the same cache/pacing."""
         cache_path = self._cache_path(url)
 
         if cache_path.exists() and not refresh:

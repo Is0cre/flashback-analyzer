@@ -121,6 +121,10 @@ antal sidor att hämta eller välja att hämta alla upptäckta sidor:
 fb tui
 ```
 
+Vid start läser TUI:t också de cacheade/live listorna för aktuella, populära,
+nya ämnen och nya inlägg. Välj en rad med dess nummer för att börja hämta
+tråden. Tryck `r` i trådlistan för att uppdatera listorna.
+
 TUI:t är kompakt som standard. Visa ANSI-logotypen uttryckligen med:
 
 ```bash

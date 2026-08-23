@@ -67,8 +67,9 @@ sudo -u backflash BACKFLASH_CONFIG=/etc/backflash/config.toml \
   /usr/local/bin/backflash-cache identity
 ```
 
-Kommandot skriver en 64 tecken lång hexsträng. Det är den publika nyckeln som
-ska användas på klienten. Klistra aldrig in `identity.key` i konfigurationen.
+Kommandot skriver en 64 tecken lång hexsträng. Det är Yggdrasils publika
+overlay-nyckel som ska användas på klienten. Klistra aldrig in `identity.key`
+i konfigurationen.
 
 Tjänsten använder `Restart=on-failure`. Vid nätverksproblem fortsätter lokal
 cache att finnas kvar och processen försöker starta om utan att någon central

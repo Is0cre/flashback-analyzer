@@ -11,6 +11,7 @@ import (
 
 	"github.com/backflash-cli/backflash/internal/mesh"
 	meshruntime "github.com/backflash-cli/backflash/internal/mesh/runtime"
+	"github.com/backflash-cli/backflash/internal/mesh/ygg"
 )
 
 func main() {
@@ -50,7 +51,16 @@ func printIdentity() {
 	if err != nil {
 		fatal("kunde inte läsa mesh-identiteten: %v", err)
 	}
-	fmt.Println(mesh.PublicKeyHex(identity))
+	// peer_key must contain Yggdrasil's derived overlay public key, not the
+	// Ed25519 public half of the persisted seed. Constructing the transport
+	// without listeners or peers is side-effect free and gives us the exact
+	// key used by the running cache process.
+	transport, err := ygg.New(ygg.Config{PrivateKey: identity})
+	if err != nil {
+		fatal("kunde inte beräkna Yggdrasil-nyckeln: %v", err)
+	}
+	defer transport.Close()
+	fmt.Println(transport.PublicKeyString())
 }
 
 func fatal(format string, args ...any) {

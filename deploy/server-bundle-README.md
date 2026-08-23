@@ -46,8 +46,8 @@ sudo -u backflash BACKFLASH_CONFIG=/etc/backflash/config.toml \
   /usr/local/bin/backflash-cache identity
 ```
 
-Detta skriver endast den publika nyckeln som hextext. Använd aldrig innehållet
-i `identity.key` som `peer_key`.
+Detta skriver endast Yggdrasils publika overlay-nyckel som hextext. Använd
+aldrig innehållet i `identity.key` som `peer_key`.
 
 ## Brandvägg
 

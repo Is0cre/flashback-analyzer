@@ -3,7 +3,6 @@ package mesh
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -79,13 +78,4 @@ func LoadIdentity(path string) (ed25519.PrivateKey, error) {
 		return nil, errors.New("meshidentitet har ogiltig storlek")
 	}
 	return ed25519.NewKeyFromSeed(data), nil
-}
-
-// PublicKeyHex returns the public half of a Backflash mesh identity as
-// configuration-safe hexadecimal text. The private seed is never returned.
-func PublicKeyHex(identity ed25519.PrivateKey) string {
-	if len(identity) != ed25519.PrivateKeySize {
-		return ""
-	}
-	return hex.EncodeToString(identity.Public().(ed25519.PublicKey))
 }

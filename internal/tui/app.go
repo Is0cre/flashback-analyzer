@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -343,14 +344,14 @@ func (a App) openSelected() (tea.Model, tea.Cmd) {
 			selected := a.Threads[a.Cursor]
 			a.CurrentView = ViewReader
 			a.Cursor = 0
-			return a, loadPosts(a.Store, a.Client, selected.ID)
+			return a, loadPosts(a.Store, a.Client, selected.ID, a.MeshRuntime)
 		}
 	case ViewRemoteSearch:
 		if a.Cursor < len(a.Results) {
 			r := a.Results[a.Cursor]
 			a.CurrentView = ViewReader
 			a.Status = "TRÅD HÄMTAS…"
-			return a, loadRemoteThread(a.Store, a.Client, r)
+			return a, loadRemoteThread(a.Store, a.Client, r, a.MeshRuntime)
 		}
 	case ViewExternalEvents:
 		if a.Cursor < len(a.Events) {
@@ -797,7 +798,7 @@ func refreshThreads(s *store.Store, c *flashback.Client, rawURL, forumID string)
 		return dataMsg{kind: "threads", threads: threads}
 	}
 }
-func loadPosts(s *store.Store, c *flashback.Client, id string) tea.Cmd {
+func loadPosts(s *store.Store, c *flashback.Client, id string, meshRuntime *meshruntime.Runtime) tea.Cmd {
 	return func() tea.Msg {
 		finish := diagnostics.Start("thread.posts")
 		defer finish()
@@ -819,12 +820,30 @@ func loadPosts(s *store.Store, c *flashback.Client, id string) tea.Cmd {
 		p, e := c.Thread(context.Background(), id, 1)
 		if e == nil {
 			_ = s.SavePage(p)
+			if meshRuntime != nil {
+				if payload, marshalErr := json.Marshal(p); marshalErr == nil {
+					object := mesh.NewObject(mesh.ThreadPageSnapshot, "flashback", id+":1", time.Now(), payload, mesh.OriginVerified)
+					_ = meshRuntime.PutLocal(object)
+				}
+			}
+			return dataMsg{kind: "posts", posts: p.Posts}
+		}
+		if meshRuntime != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if object, meshErr := meshRuntime.GetResource(ctx, "flashback", id+":1", mesh.ThreadPageSnapshot); meshErr == nil {
+				var cached flashback.ParsedPage
+				if decodeErr := json.Unmarshal(object.Payload, &cached); decodeErr == nil {
+					_ = s.SavePage(cached)
+					return dataMsg{kind: "posts", posts: cached.Posts}
+				}
+			}
 		}
 		return dataMsg{kind: "posts", posts: p.Posts, err: e}
 	}
 }
-func loadRemoteThread(s *store.Store, c *flashback.Client, r flashback.SearchResult) tea.Cmd {
-	return loadPosts(s, c, r.ThreadID)
+func loadRemoteThread(s *store.Store, c *flashback.Client, r flashback.SearchResult, meshRuntime *meshruntime.Runtime) tea.Cmd {
+	return loadPosts(s, c, r.ThreadID, meshRuntime)
 }
 func remoteSearch(c *flashback.Client, q string, page int) tea.Cmd {
 	return func() tea.Msg {

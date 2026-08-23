@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ObjectStore persists public immutable cache objects separately from the
@@ -94,4 +95,24 @@ func (s *ObjectStore) Count() (int, error) {
 		}
 	}
 	return count, nil
+}
+
+func (s *ObjectStore) Find(source, resourceID string, typ ObjectType) (CacheObject, error) {
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		return CacheObject{}, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		o, err := s.Get(strings.TrimSuffix(entry.Name(), ".json"))
+		if err != nil {
+			continue
+		}
+		if o.Source == source && o.ResourceID == resourceID && (typ == "" || o.Type == typ) {
+			return o, nil
+		}
+	}
+	return CacheObject{}, os.ErrNotExist
 }

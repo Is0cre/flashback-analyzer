@@ -27,8 +27,11 @@ type ContextTransport interface {
 }
 
 type Message struct {
-	Type MessageType `json:"type"`
-	ID   string      `json:"id,omitempty"`
-	Hash string      `json:"hash,omitempty"`
-	Body []byte      `json:"body,omitempty"`
+	Type       MessageType `json:"type"`
+	ID         string      `json:"id,omitempty"`
+	Hash       string      `json:"hash,omitempty"`
+	Source     string      `json:"source,omitempty"`
+	ResourceID string      `json:"resource_id,omitempty"`
+	ObjectType string      `json:"object_type,omitempty"`
+	Body       []byte      `json:"body,omitempty"`
 }

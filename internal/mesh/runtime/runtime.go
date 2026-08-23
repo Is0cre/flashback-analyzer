@@ -217,6 +217,21 @@ func (r *Runtime) GetContext(ctx context.Context, hash string) (mesh.CacheObject
 	return cache.GetContext(ctx, hash)
 }
 
+func (r *Runtime) GetResource(ctx context.Context, source, resourceID string, typ mesh.ObjectType) (mesh.CacheObject, error) {
+	r.mu.RLock()
+	cache, state := r.cache, r.state
+	r.mu.RUnlock()
+	if cache == nil {
+		return mesh.CacheObject{}, errors.New("mesh-runtime saknar cachelager")
+	}
+	if state != Running && state != Degraded {
+		return mesh.CacheObject{}, errors.New("mesh-runtime är inte aktiv: " + string(state))
+	}
+	finish := diagnostics.Start("mesh_lookup")
+	defer finish()
+	return cache.GetResource(ctx, source, resourceID, typ)
+}
+
 func (r *Runtime) PutLocal(object mesh.CacheObject) error {
 	r.mu.RLock()
 	store := r.store

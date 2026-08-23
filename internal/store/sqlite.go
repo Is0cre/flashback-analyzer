@@ -4,13 +4,18 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/backflash-cli/backflash/internal/diagnostics"
 	"github.com/backflash-cli/backflash/internal/flashback"
 	_ "modernc.org/sqlite"
 )
 
-type Store struct{ DB *sql.DB }
+type Store struct {
+	DB   *sql.DB
+	Path string
+}
 
 func Open(path string) (*Store, error) {
 	finish := diagnostics.Start("store.open")
@@ -23,7 +28,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{DB: db}
+	s := &Store{DB: db, Path: path}
 	if err := s.Migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -76,6 +81,9 @@ func (s *Store) SaveThreads(forumID string, rows []flashback.ThreadSummary) erro
 	}
 	defer tx.Rollback()
 	for i, r := range rows {
+		if strings.TrimSpace(r.Title) == "" {
+			continue
+		}
 		_, err = tx.Exec(`INSERT INTO threads(id,title,url,forum_id,replies,views,last_post_at,last_post_author,sticky,page_count,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET title=excluded.title,url=excluded.url,forum_id=excluded.forum_id,replies=excluded.replies,views=excluded.views,last_post_at=excluded.last_post_at,last_post_author=excluded.last_post_author,sticky=excluded.sticky,page_count=excluded.page_count,last_seen_at=CURRENT_TIMESTAMP`, r.ID, r.Title, r.URL, forumID, r.Replies, r.Views, r.LastPostAt, r.LastPostAuthor, r.Sticky, r.PageCount)
 		if err != nil {
 			return err
@@ -99,7 +107,11 @@ func (s *Store) SavePage(page flashback.ParsedPage) error {
 		return err
 	}
 	for _, p := range page.Posts {
-		_, err = tx.Exec(`INSERT INTO posts(id,thread_id,author,timestamp,page,position,text,raw_text,source_url) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET author=excluded.author,timestamp=excluded.timestamp,page=excluded.page,position=excluded.position,text=excluded.text,raw_text=excluded.raw_text,source_url=excluded.source_url,last_seen_at=CURRENT_TIMESTAMP`, p.ID, p.ThreadID, p.Author, p.Timestamp, p.Page, p.Position, p.Text, p.RawText, p.SourceURL)
+		timestamp := any(nil)
+		if !p.Timestamp.IsZero() {
+			timestamp = p.Timestamp.Format(time.RFC3339Nano)
+		}
+		_, err = tx.Exec(`INSERT INTO posts(id,thread_id,author,timestamp,page,position,text,raw_text,source_url) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET author=excluded.author,timestamp=excluded.timestamp,page=excluded.page,position=excluded.position,text=excluded.text,raw_text=excluded.raw_text,source_url=excluded.source_url,last_seen_at=CURRENT_TIMESTAMP`, p.ID, p.ThreadID, p.Author, timestamp, p.Page, p.Position, p.Text, p.RawText, p.SourceURL)
 		if err != nil {
 			return err
 		}

@@ -43,3 +43,34 @@ databas, navigation, trådlistor, poster och rendering utan att logga innehåll.
 
 GANDR:s SQLite-driver används inte som förebild för ett byte: BACKFLASH använder
 redan en CGO-fri SQLite-driver för enklare portabla byggen.
+
+## Faktisk livscykel i GANDR
+
+GANDR:s klient och daemon har olika roller. `cmd/gandr` laddar en krypterad
+identitet och öppnar den krypterade klientdatabasen innan den ansluter till
+`gandrd` över IPC. `cmd/gandrd` äger nodens livscykel och startar bland annat
+embedded Yggdrasil med en separat transportnyckel. Detta är inte samma nyckel
+som användaridentiteten.
+
+BACKFLASH importerar därför inte GANDR-modulen i den första integrationen.
+`internal/gandr` är en liten låst gräns som kan visa ofarlig status, men öppnar
+varken GANDR:s vault, identitet eller privata databas vid startup. En framtida
+upplåsning måste återanvända GANDR:s riktiga krypterade lagring genom en
+explicit adapter eller IPC-gräns; en parallell BACKFLASH-vault får inte skapas.
+
+## Integritetsinvarianter
+
+Följande ska förbli sant även när subsystemet byggs ut:
+
+- Gandr-identitet och BACKFLASH:s eventuella cache-peer-identitet är olika.
+- GANDR:s krypterade klientdatabas och BACKFLASH:s publika SQLite/cache är olika
+  lagringsdomäner.
+- Gandr-petnames, privata meddelanden och Flashback-läsdata lämnar aldrig sina
+  respektive domäner.
+- BACKFLASH får inte skicka Flashback-cookies, Flashback-användarnamn eller
+  läshistorik till GANDR eller cache-mesh.
+
+Detta skyddar GANDR:s privata kommunikation från oavsiktlig exponering via en
+publik klient. Om gränsen bryts kan en publik cache eller dashboard börja
+fungera som en identitets- eller metadata-korrelationstjänst, vilket är ett
+arkitekturfel och inte bara en UI-fråga.

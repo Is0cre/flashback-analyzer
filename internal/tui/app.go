@@ -12,6 +12,7 @@ import (
 	"github.com/backflash-cli/backflash/internal/external"
 	"github.com/backflash-cli/backflash/internal/external/polisen"
 	"github.com/backflash-cli/backflash/internal/flashback"
+	"github.com/backflash-cli/backflash/internal/gandr"
 	"github.com/backflash-cli/backflash/internal/service"
 	"github.com/backflash-cli/backflash/internal/store"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -31,6 +32,8 @@ const (
 	ViewReader
 	ViewRemoteSearch
 	ViewExternalEvents
+	ViewMesh
+	ViewGandr
 )
 
 type dataMsg struct {
@@ -44,6 +47,11 @@ type dataMsg struct {
 	refresh    bool
 	refreshURL string
 	err        error
+}
+
+type dashboardMsg struct {
+	snapshot service.DashboardSnapshot
+	err      error
 }
 type App struct {
 	Store        *store.Store
@@ -65,6 +73,9 @@ type App struct {
 	Events       []external.ExternalEvent
 	EventDetail  *external.ExternalEvent
 	EventService *service.ExternalEventsService
+	Dashboard    service.DashboardSnapshot
+	DashboardSvc *service.DashboardService
+	Gandr        *gandr.Subsystem
 }
 
 var (
@@ -82,7 +93,8 @@ func New(s *store.Store, c *flashback.Client) App {
 	input.CharLimit = 200
 	eventClient := polisen.NewClient(nil, nil)
 	eventService := &service.ExternalEventsService{Store: s, Provider: eventClient, RefreshAfter: 2 * time.Minute, Now: time.Now}
-	return App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1, EventService: eventService}
+	dashboard := &service.DashboardService{Store: s, Now: time.Now}
+	return App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1, EventService: eventService, DashboardSvc: dashboard, Gandr: gandr.New()}
 }
 
 func Splash(w io.Writer, width int) {
@@ -102,7 +114,9 @@ func Splash(w io.Writer, width int) {
 	_, _ = w.Write(append(b, []byte("\x1b[0m\n")...))
 }
 
-func (a App) Init() tea.Cmd { return loadCachedEvents(a.EventService) }
+func (a App) Init() tea.Cmd {
+	return tea.Batch(loadCachedEvents(a.EventService), loadDashboard(a.DashboardSvc))
+}
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -145,6 +159,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return a, refreshEvents(a.EventService)
 			}
 		}
+	case dashboardMsg:
+		if m.err != nil {
+			a.Status = "FEL · lokalt dashboard"
+			return a, nil
+		}
+		a.Dashboard = m.snapshot
 	case tea.KeyMsg:
 		if a.Input.Focused() {
 			if m.String() == "enter" {
@@ -169,7 +189,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch m.String() {
 		case "ctrl+c", "q":
+			if a.CurrentView != ViewOverview {
+				a.CurrentView, a.Cursor, a.EventDetail = ViewOverview, 0, nil
+				return a, loadDashboard(a.DashboardSvc)
+			}
 			return a, tea.Quit
+		case "home", "h":
+			a.CurrentView, a.Cursor, a.EventDetail = ViewOverview, 0, nil
+			return a, loadDashboard(a.DashboardSvc)
 		case "f":
 			a.CurrentView, a.Cursor = ViewForums, 0
 			return a, loadRoot(a.Store, a.Client)
@@ -179,13 +206,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "p":
 			a.CurrentView, a.Cursor, a.EventDetail = ViewExternalEvents, 0, nil
 			return a, loadCachedEvents(a.EventService)
+		case "m":
+			a.CurrentView, a.Cursor = ViewMesh, 0
+			return a, nil
+		case "g":
+			a.CurrentView, a.Cursor = ViewGandr, 0
+			return a, nil
 		case "b":
 			if len(a.Stack) > 0 {
 				a.Stack = a.Stack[:len(a.Stack)-1]
 				return a, loadChildren(a.Store, a.Stack)
 			}
 			a.CurrentView = ViewOverview
-			return a, nil
+			return a, loadDashboard(a.DashboardSvc)
 		case "j", "down":
 			a.move(1)
 		case "k", "up":
@@ -278,9 +311,10 @@ func (a App) openSelected() (tea.Model, tea.Cmd) {
 		}
 	case ViewThreads:
 		if a.Cursor < len(a.Threads) {
+			selected := a.Threads[a.Cursor]
 			a.CurrentView = ViewReader
 			a.Cursor = 0
-			return a, loadPosts(a.Store, a.Client, a.Threads[a.Cursor].ID)
+			return a, loadPosts(a.Store, a.Client, selected.ID)
 		}
 	case ViewRemoteSearch:
 		if a.Cursor < len(a.Results) {
@@ -305,15 +339,7 @@ func (a App) View() string {
 	b.WriteString("\n\n")
 	switch a.CurrentView {
 	case ViewOverview:
-		b.WriteString(titleStyle.Render("ÖVERSIKT"))
-		b.WriteString("\n\nSTATUS\n  DB          REDO\n  NÄTVERK     " + a.Status + "\n  SESSION     " + map[bool]string{true: "AKTIV", false: "ANONYM"}[a.Client.Session.Authenticated()])
-		b.WriteString("\n\nPOLISHÄNDELSER\n")
-		if len(a.Events) == 0 {
-			b.WriteString("Inga sparade polishändelser.\n")
-		} else {
-			b.WriteString(renderEventSummary(a.Events))
-		}
-		b.WriteString("\nSkriv p för alla polishändelser, f för forum, / för fjärrsökning eller Ctrl+F för lokal sökning.")
+		b.WriteString(renderDashboard(a))
 	case ViewForums:
 		b.WriteString(titleStyle.Render("FORUM · " + a.breadcrumb()))
 		b.WriteString("\n\n")
@@ -337,11 +363,17 @@ func (a App) View() string {
 		if a.EventDetail != nil {
 			b.WriteString("\n\n" + renderEventDetail(*a.EventDetail))
 		}
+	case ViewMesh:
+		b.WriteString(titleStyle.Render("CACHE-MESH"))
+		b.WriteString("\n\nYGGDRASIL   " + a.Dashboard.Mesh + "\nSTATUS      Publik cache-mesh är inte aktiverad.\n\n" + muted.Render("Mesh är opt-in och har ingen koppling till Gandr-identitet."))
+	case ViewGandr:
+		b.WriteString(titleStyle.Render("ᚷ GANDR"))
+		b.WriteString("\n\nVAULT       LÅST\n\nGandr startas inte automatiskt. Lås upp subsystemet explicit när det behövs.\n\n" + muted.Render("Gandr-identitet, privat databas och petnames hålls separerade från BACKFLASH."))
 	}
 	if a.Input.Focused() {
 		b.WriteString("\n\n" + a.Input.View())
 	}
-	b.WriteString("\n\n" + muted.Render("j/k flytta · Enter öppna · f forum · / fjärrsök · Ctrl+F lokalt · b tillbaka · q avsluta"))
+	b.WriteString("\n\n" + muted.Render("j/k flytta · Enter öppna · f forum · / fjärrsök · Ctrl+F lokalt · p polis · m mesh · g Gandr · h dashboard · q tillbaka/avsluta"))
 	return b.String()
 }
 func (a App) breadcrumb() string {
@@ -433,6 +465,93 @@ func renderEventDetail(e external.ExternalEvent) string {
 		b.WriteString("\n\nKÄLLA      " + e.URL)
 	}
 	return b.String()
+}
+
+func renderDashboard(a App) string {
+	d := a.Dashboard
+	width := a.Width
+	if width == 0 {
+		width = 120
+	}
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("ÖVERSIKT · DISKURS-NOC"))
+	b.WriteString("\n\n")
+	if width >= 120 {
+		b.WriteString("LOKAL DATA                         AKTIVITET                         STATUS\n")
+		b.WriteString("────────────────────────────       ────────────────────────────       ───────────────\n")
+		b.WriteString(fmt.Sprintf("Forum        %s                     Inlägg / 60m  %s                  DB        REDO\n", number(d.ForumCount), number(d.PostsLastHour)))
+		b.WriteString(fmt.Sprintf("Trådar       %s                     Aktiva trådar %s                  Nätverk   %s\n", number(d.ThreadCount), number(d.ActiveThreads), d.Network))
+		b.WriteString(fmt.Sprintf("Inlägg       %s                     Aktiva forum  %s                  Session   %s\n", number(d.PostCount), number(d.ActiveForums), d.Session))
+		b.WriteString(fmt.Sprintf("DB           %s                     Nya trådar    %s                  Synk      %s\n", bytes(d.DBSize), number(d.NewThreads), d.Sync))
+		b.WriteString("\nHETAST JUST NU                    CACHE-MESH                         GANDR\n")
+		b.WriteString("────────────────────────────       ────────────────────────────       ───────────────\n")
+		b.WriteString(renderHot(d.HotThreads))
+		b.WriteString(fmt.Sprintf("                                   Yggdrasil    %s                 ᚷ %s\n", d.Mesh, d.Gandr))
+		b.WriteString("                                   Lokala objekt —                 privat läge\n")
+		b.WriteString("\nPOLISHÄNDELSER\n────────────────────────────\n")
+		if len(a.Events) == 0 {
+			b.WriteString("Inga sparade polishändelser.\n")
+		} else {
+			b.WriteString(renderEventSummary(a.Events))
+		}
+	} else if width >= 80 {
+		b.WriteString(fmt.Sprintf("LOKAL DATA\nForum %s · Trådar %s · Inlägg %s · DB %s\n\n", number(d.ForumCount), number(d.ThreadCount), number(d.PostCount), bytes(d.DBSize)))
+		b.WriteString(fmt.Sprintf("AKTIVITET\nInlägg / 60m %s · Aktiva trådar %s · Nya trådar %s\n\n", number(d.PostsLastHour), number(d.ActiveThreads), number(d.NewThreads)))
+		b.WriteString(fmt.Sprintf("STATUS\nDB REDO · Nätverk %s · Session %s · Synk %s\n\nCACHE-MESH %s · GANDR ᚷ %s\n", d.Network, d.Session, d.Sync, d.Mesh, d.Gandr))
+		b.WriteString("POLISHÄNDELSER\n" + renderEventSummary(a.Events))
+	} else {
+		b.WriteString("DATA\n")
+		b.WriteString(fmt.Sprintf("%s forum\n%s trådar\n%s inlägg\n\n", number(d.ForumCount), number(d.ThreadCount), number(d.PostCount)))
+		b.WriteString("AKTIVITET\n" + number(d.PostsLastHour) + " / 60m\n\n")
+		b.WriteString("MESH " + d.Mesh + "\nGANDR ᚷ " + d.Gandr)
+	}
+	b.WriteString("\n\n" + muted.Render("[f] Forum  [/] Sök  [p] Polis  [m] Mesh  [g] Gandr  [h] Hem"))
+	return b.String()
+}
+
+func renderHot(rows []service.HotThread) string {
+	if len(rows) == 0 {
+		return "—                                "
+	}
+	var b strings.Builder
+	for _, row := range rows[:min(len(rows), 3)] {
+		b.WriteString(fmt.Sprintf("▲ %4s/h  %s\n", number(row.Posts), row.Title))
+	}
+	return b.String()
+}
+
+func number(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func bytes(n int64) string {
+	if n <= 0 {
+		return "—"
+	}
+	if n < 1024*1024 {
+		return fmt.Sprintf("%d KB", n/1024)
+	}
+	return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func loadDashboard(dashboard *service.DashboardService) tea.Cmd {
+	return func() tea.Msg {
+		if dashboard == nil {
+			return dashboardMsg{}
+		}
+		snapshot, err := dashboard.Snapshot(context.Background())
+		return dashboardMsg{snapshot: snapshot, err: err}
+	}
 }
 
 func loadRoot(s *store.Store, c *flashback.Client) tea.Cmd {
@@ -532,7 +651,7 @@ func loadForum(s *store.Store, c *flashback.Client, n flashback.ForumNode) tea.C
 	return func() tea.Msg {
 		finish := diagnostics.Start("forum.threads")
 		defer finish()
-		dbRows, e := s.DB.Query(`SELECT t.id,t.title,t.url,t.replies,t.views,t.last_post_at,t.last_post_author,t.sticky,t.page_count FROM forum_threads ft JOIN threads t ON t.id=ft.thread_id WHERE ft.forum_id=? ORDER BY ft.position`, n.ID)
+		dbRows, e := s.DB.Query(`SELECT t.id,t.title,t.url,t.replies,t.views,t.last_post_at,t.last_post_author,t.sticky,t.page_count FROM forum_threads ft JOIN threads t ON t.id=ft.thread_id WHERE ft.forum_id=? AND trim(t.title)<>'' ORDER BY ft.position`, n.ID)
 		if e == nil {
 			defer dbRows.Close()
 			var out []flashback.ThreadSummary

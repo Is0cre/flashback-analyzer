@@ -60,6 +60,57 @@ func TestForumThreadCachePreservesSourceOrderAfterReopen(t *testing.T) {
 	}
 }
 
+func TestForumRootsUseSQLNullAndNestedForumsRemainReachable(t *testing.T) {
+	s, path := openTestStore(t)
+	if err := s.SaveForums([]flashback.ForumNode{
+		{ID: "f1", Title: "Samhälle", URL: "https://www.flashback.org/f1"},
+		{ID: "f2", Title: "Brott", URL: "https://www.flashback.org/f2", ParentID: "f1", Depth: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var roots, children int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM forums WHERE parent_id IS NULL`).Scan(&roots); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM forums WHERE parent_id=?`, "f1").Scan(&children); err != nil {
+		t.Fatal(err)
+	}
+	if roots != 1 || children != 1 {
+		t.Fatalf("forumhierarkin sparades fel: rötter=%d barn=%d", roots, children)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.DB.QueryRow(`SELECT COUNT(*) FROM forums WHERE parent_id IS NULL`).Scan(&roots); err != nil {
+		t.Fatal(err)
+	}
+	if roots != 1 {
+		t.Fatalf("rotforum försvann efter omstart: %d", roots)
+	}
+}
+
+func TestMigrationRepairsLegacyEmptyForumParent(t *testing.T) {
+	s, _ := openTestStore(t)
+	if _, err := s.DB.Exec(`INSERT INTO forums(id,title,url,parent_id) VALUES('legacy','Gammalt','https://www.flashback.org/flegacy','')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	var parent any
+	if err := s.DB.QueryRow(`SELECT parent_id FROM forums WHERE id='legacy'`).Scan(&parent); err != nil {
+		t.Fatal(err)
+	}
+	if parent != nil {
+		t.Fatalf("legacy tom parent reparerades inte: %#v", parent)
+	}
+}
+
 func TestPostCacheAndFTSSurviveReopen(t *testing.T) {
 	s, path := openTestStore(t)
 	page := flashback.ParsedPage{

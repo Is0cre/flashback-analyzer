@@ -56,6 +56,13 @@ CREATE INDEX IF NOT EXISTS idx_threads_last_post ON threads(last_post_at);
 CREATE INDEX IF NOT EXISTS idx_posts_thread_page_position ON posts(thread_id, page, position, id);
 CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author);
 CREATE VIRTUAL TABLE IF NOT EXISTS post_search USING fts5(post_id UNINDEXED, thread_id UNINDEXED, author, text);`)
+	if err != nil {
+		return err
+	}
+	// Older versions persisted a root forum's empty ParentID as "". The
+	// navigation queries intentionally use SQL NULL for roots, so repair that
+	// representation during the normal migration path.
+	_, err = s.DB.Exec(`UPDATE forums SET parent_id=NULL WHERE parent_id=''`)
 	return err
 }
 
@@ -66,7 +73,11 @@ func (s *Store) SaveForums(nodes []flashback.ForumNode) error {
 	}
 	defer tx.Rollback()
 	for _, n := range nodes {
-		_, err = tx.Exec(`INSERT INTO forums(id,title,url,parent_id,depth,sort_order,has_children,browsable,last_seen_at) VALUES(?,?,?,?,?,?,?,? ,CURRENT_TIMESTAMP) ON CONFLICT(url) DO UPDATE SET title=excluded.title,parent_id=excluded.parent_id,depth=excluded.depth,sort_order=excluded.sort_order,has_children=excluded.has_children,last_seen_at=CURRENT_TIMESTAMP`, n.ID, n.Title, n.URL, n.ParentID, n.Depth, n.SortOrder, n.HasChildren, n.Browsable)
+		var parent any
+		if n.ParentID != "" {
+			parent = n.ParentID
+		}
+		_, err = tx.Exec(`INSERT INTO forums(id,title,url,parent_id,depth,sort_order,has_children,browsable,last_seen_at) VALUES(?,?,?,?,?,?,?,? ,CURRENT_TIMESTAMP) ON CONFLICT(url) DO UPDATE SET title=excluded.title,parent_id=excluded.parent_id,depth=excluded.depth,sort_order=excluded.sort_order,has_children=excluded.has_children,last_seen_at=CURRENT_TIMESTAMP`, n.ID, n.Title, n.URL, parent, n.Depth, n.SortOrder, n.HasChildren, n.Browsable)
 		if err != nil {
 			return err
 		}

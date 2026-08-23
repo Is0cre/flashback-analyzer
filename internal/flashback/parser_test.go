@@ -48,6 +48,17 @@ func TestParseNestedNavigation(t *testing.T) {
 	}
 }
 
+func TestParsersDecodeLegacyWindows1252ForumText(t *testing.T) {
+	html := `<table class="forumslist"><tr><td class="td_forum"><a href="/f9-samhalle">Samh` + string([]byte{0xe4}) + `lle</a></td></tr></table>`
+	nodes, err := ParseNavigation(html, BaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Title != "Samhälle" {
+		t.Fatalf("Windows-1252-text dekoderades fel: %#v", nodes)
+	}
+}
+
 func TestParseThreadListingExtractsTitlesNotIDs(t *testing.T) {
 	rows, err := ParseThreadListing(fixture(t, "forum_listing.html"), "https://www.flashback.org/f10", "10")
 	if err != nil {

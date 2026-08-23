@@ -5,18 +5,32 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/PuerkitoBio/goquery"
+	"golang.org/x/text/encoding/charmap"
 )
 
 var numberPattern = regexp.MustCompile(`[0-9][0-9\s\x{00a0}.,]*`)
 
 func clean(s string) string { return strings.Join(strings.Fields(s), " ") }
 
+func decodeHTML(html string) string {
+	if utf8.ValidString(html) {
+		return html
+	}
+	decoded, err := charmap.Windows1252.NewDecoder().String(html)
+	if err != nil {
+		return html
+	}
+	return decoded
+}
+
 // ParseNavigation only walks Flashback's forum-list cells and category
 // containers. This is deliberate: last-post cells contain /f<ID>lp links to
 // users, while the page also contains unrelated profile and thread links.
 func ParseNavigation(html, sourceURL string) ([]ForumNode, error) {
+	html = decodeHTML(html)
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		return nil, err
@@ -71,6 +85,7 @@ func ParseNavigation(html, sourceURL string) ([]ForumNode, error) {
 func mustAttr(s *goquery.Selection, key string) string { v, _ := s.Attr(key); return v }
 
 func ParseThreadListing(html, sourceURL, forumID string) ([]ThreadSummary, error) {
+	html = decodeHTML(html)
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		return nil, err
@@ -179,6 +194,7 @@ func maxPage(s string) int {
 }
 
 func ParseSearchResults(html, sourceURL string) ([]SearchResult, error) {
+	html = decodeHTML(html)
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		return nil, err
@@ -233,6 +249,7 @@ func ThreadIDFromHTML(s string) string {
 }
 
 func ParseThreadPage(html, sourceURL, threadID string, page int) (ParsedPage, error) {
+	html = decodeHTML(html)
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		return ParsedPage{}, err

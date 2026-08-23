@@ -896,7 +896,16 @@ func refreshNavigation(s *store.Store, c *flashback.Client, rawURL string) tea.C
 			return dataMsg{kind: "forums", err: err}
 		}
 		_ = s.SetExternalSyncState(external.SyncState{Source: navigationSource, LastSyncedAt: time.Now(), Status: "ok"})
-		return dataMsg{kind: "forums", forums: nodes}
+		// ParseNavigation returns the complete snapshot so parent links can be
+		// persisted. The root pane must only receive actual roots; otherwise a
+		// successful refresh flattens every subforum into the visible menu.
+		var roots []flashback.ForumNode
+		for _, node := range nodes {
+			if node.ParentID == "" {
+				roots = append(roots, node)
+			}
+		}
+		return dataMsg{kind: "forums", forums: roots}
 	}
 }
 func loadForum(s *store.Store, c *flashback.Client, n flashback.ForumNode) tea.Cmd {

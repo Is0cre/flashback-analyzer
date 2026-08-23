@@ -94,7 +94,7 @@ func New(s *store.Store, c *flashback.Client) App {
 	input.CharLimit = 200
 	eventClient := polisen.NewClient(nil, nil)
 	eventService := &service.ExternalEventsService{Store: s, Provider: eventClient, RefreshAfter: 2 * time.Minute, Now: time.Now}
-	dashboard := &service.DashboardService{Store: s, Now: time.Now, MeshEnabled: mesh.Load().Enabled}
+	dashboard := &service.DashboardService{Store: s, Now: time.Now, MeshConfigured: mesh.Load().Enabled}
 	return App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1, EventService: eventService, DashboardSvc: dashboard, Gandr: gandr.New()}
 }
 
@@ -366,7 +366,11 @@ func (a App) View() string {
 		}
 	case ViewMesh:
 		b.WriteString(titleStyle.Render("CACHE-MESH"))
-		b.WriteString("\n\nYGGDRASIL   " + a.Dashboard.Mesh + "\nSTATUS      Publik cache-mesh är inte aktiverad.\n\n" + muted.Render("Mesh är opt-in och har ingen koppling till Gandr-identitet."))
+		status := "Publik cache-mesh är inte aktiverad."
+		if a.Dashboard.Mesh == "VALD" {
+			status = "Mesh är vald men transporten är inte startad ännu."
+		}
+		b.WriteString("\n\nYGGDRASIL   " + a.Dashboard.Mesh + "\nSTATUS      " + status + "\n\n" + muted.Render("Mesh är opt-in och har ingen koppling till Gandr-identitet."))
 	case ViewGandr:
 		b.WriteString(titleStyle.Render("ᚷ GANDR"))
 		b.WriteString("\n\nVAULT       LÅST\n\nGandr startas inte automatiskt. Lås upp subsystemet explicit när det behövs.\n\n" + muted.Render("Gandr-identitet, privat databas och petnames hålls separerade från BACKFLASH."))

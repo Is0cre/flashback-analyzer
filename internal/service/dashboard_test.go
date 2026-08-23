@@ -37,3 +37,18 @@ func TestDashboardSnapshotUsesLocalDatabaseOnly(t *testing.T) {
 		t.Fatalf("saknar het tråd: %#v", snapshot.HotThreads)
 	}
 }
+
+func TestDashboardDoesNotClaimMeshOnlineWhenOnlyConfigured(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "backflash.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	snapshot, err := (&DashboardService{Store: s, Now: time.Now, MeshConfigured: true}).Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Mesh != "VALD" {
+		t.Fatalf("meshstatus blev %q, väntade VALD", snapshot.Mesh)
+	}
+}

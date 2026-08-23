@@ -135,8 +135,9 @@ func (n *Node) PeerCount() int {
 }
 
 // Request implements mesh.Transport for one configured remote Yggdrasil key.
-// A transport is serialized because the compact MVP protocol is request/
-// response and has no multiplexing identifier yet.
+// The compact protocol is request/response, while request IDs allow the
+// reader loop to route responses safely. Writes remain serialized to avoid
+// flooding a route that is still converging.
 func (n *Node) Request(request mesh.Message) (mesh.Message, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -167,7 +168,7 @@ func (n *Node) RequestContext(ctx context.Context, request mesh.Message) (mesh.M
 	responseCh := make(chan mesh.Message, 1)
 	n.pending[request.ID] = responseCh
 	defer delete(n.pending, request.ID)
-	for {
+	for attempt := 0; ; attempt++ {
 		if _, err := n.core.WriteTo(b, n.peer); err != nil {
 			n.lastFailed.Store(time.Now().UnixNano())
 			return mesh.Message{}, err
@@ -184,12 +185,28 @@ func (n *Node) RequestContext(ctx context.Context, request mesh.Message) (mesh.M
 			}
 			n.lastOK.Store(time.Now().UnixNano())
 			return response, nil
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(retryDelay(attempt)):
 			// A link can be up before the overlay route is ready. Retry the
-			// datagram without blocking the caller indefinitely.
+			// datagram with bounded jitter without busy-looping.
 			continue
 		}
 	}
+}
+
+func retryDelay(attempt int) time.Duration {
+	if attempt > 3 {
+		attempt = 3
+	}
+	delay := 250 * time.Millisecond * time.Duration(1<<attempt)
+	// Keep retries from synchronizing when several clients notice a route at
+	// the same time. Failure to obtain randomness simply uses the base delay.
+	var sample [1]byte
+	if _, err := rand.Read(sample[:]); err != nil {
+		return delay
+	}
+	// Map 0..255 to approximately -20%..+20%.
+	offset := (int(sample[0]) - 128) * int(delay/5) / 128
+	return delay + time.Duration(offset)
 }
 
 func requestID() string {

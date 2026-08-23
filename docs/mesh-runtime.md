@@ -19,7 +19,25 @@ protokoll.
 
 ## Konfiguration
 
-Den nuvarande konfigurationsläsaren använder explicita miljövariabler:
+Standardfilen är:
+
+```text
+$XDG_CONFIG_HOME/backflash/config.toml
+```
+
+eller `~/.config/backflash/config.toml` när `XDG_CONFIG_HOME` saknas. En
+alternativ fil kan anges med `BACKFLASH_CONFIG`. Exempel:
+
+```toml
+[mesh]
+enabled = true
+share_cache = false
+listen = ["tcp://127.0.0.1:4242"]
+peers = ["tcp://peer.example:4242"]
+peer_key = "<hexadecimal Yggdrasil-publik nyckel>"
+```
+
+Miljövariablerna finns kvar som explicita overrides för test och utveckling:
 
 ```bash
 BACKFLASH_MESH_ENABLED=1

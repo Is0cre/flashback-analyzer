@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/Arceliar/ironwood v0.0.0-20260117132459-7017dbc41d8e
+	github.com/BurntSushi/toml v1.6.0
 	github.com/PuerkitoBio/goquery v1.10.2
 	github.com/charmbracelet/bubbles v0.18.0
 	github.com/charmbracelet/bubbletea v1.1.0

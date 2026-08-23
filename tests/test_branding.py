@@ -8,5 +8,5 @@ def test_wordmark_degrades_by_terminal_width():
 
 
 def test_empty_state_has_compact_and_mascot_forms():
-    assert "humanity pending" in render_empty_state(40, 20)
-    assert "DOG AWAKE" in render_empty_state(80, 20)
+    assert "mänskligheten väntar" in render_empty_state(40, 20)
+    assert "HUND VAKEN" in render_empty_state(80, 20)

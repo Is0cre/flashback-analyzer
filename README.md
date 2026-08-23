@@ -2,12 +2,11 @@
 
 ## BACKFLASH
 
-BACKFLASH is an independent terminal-native client and analysis interface for
-Flashback forum content. It focuses on keyboard navigation, high information
-density, local caching, search, thread analysis, and a restrained
-night-shift/NOC-style discourse console. Its ASCII wordmark and tired terminal
-dog are original client identity elements; BACKFLASH is not an official
-Flashback client.
+BACKFLASH är en fristående terminalklient och analysvy för innehåll från
+Flashback. Den fokuserar på tangentbordsnavigering, hög informationstäthet,
+lokal cache, sökning, trådanalys och en återhållsam diskursövervakning för
+nattpasset. ASCII-logotypen och den bakfulla terminalhunden är egna
+identitetselement; BACKFLASH är inte en officiell Flashback-klient.
 
 Read-only grund för att samla in och analysera Flashback-trådar utan att blanda ihop citerad text med nya påståenden.
 

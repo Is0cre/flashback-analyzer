@@ -10,26 +10,27 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static
 
 from .database import Database
-from .branding import render_empty_state, render_wordmark
+from .branding import render_overview, render_wordmark
 from .fetcher import Fetcher
 from .navigation_service import NavigationService
 from .parser import parse_thread_page
 from .search import SearchResult, SearchService
 from .adapters.flashback.search import FlashbackSearchAdapter
+from .ui_strings import text
 
 
 class ThreadItem(ListItem):
     def __init__(self, thread_id: int, title: str, unread: int, posts: int) -> None:
         self.thread_id = thread_id
-        text = f"{'+' + str(unread) if unread else '  '}  {title or f't{thread_id}'}  ({posts})"
-        super().__init__(Label(text, markup=False))
+        label = f"{'+' + str(unread) if unread else '  '}  {title or text('untitled')}  ({posts})"
+        super().__init__(Label(label, markup=False))
 
 
 class PostItem(ListItem):
     def __init__(self, post_id: int, username: str, timestamp: str | None, preview: str, unread: bool) -> None:
         self.post_id = post_id
         marker = "● " if unread else "  "
-        time = (timestamp or "okänd tid")[:16]
+        time = (timestamp or text("unknown_time"))[:16]
         super().__init__(Label(f"{marker}#{post_id} {username} · {time}\n    {preview[:140]}", markup=False))
 
 
@@ -57,13 +58,13 @@ class ForumThreadItem(ListItem):
 class RemoteSearchItem(ListItem):
     def __init__(self, result: SearchResult) -> None:
         self.result = result
-        detail = f"#{result.post_id or '?'} {result.author or '?'} · {result.forum or 'okänt forum'}"
+        detail = f"#{result.post_id or '?'} {result.author or '?'} · {result.forum or text('unknown_forum')}"
         super().__init__(Label(Text(f"{detail}\n  {result.title}: {result.snippet[:160]}", overflow="ellipsis"), markup=False))
 
 
 class FlashbackApp(App[None]):
-    TITLE = "BACKFLASH // DISCOURSE OPS"
-    SUB_TITLE = "local terminal console"
+    TITLE = text("app_title")
+    SUB_TITLE = text("app_subtitle")
     CSS = """
     Screen { background: $surface; }
     #body { height: 1fr; }
@@ -79,16 +80,16 @@ class FlashbackApp(App[None]):
     """
 
     BINDINGS = [
-        Binding("j", "next", "Next", show=False), Binding("k", "previous", "Previous", show=False),
-        Binding("J", "next_unread", "Next unread"), Binding("K", "previous_unread", "Previous unread"),
-        Binding("g", "first", "First", show=False), Binding("G", "last", "Last", show=False),
-        Binding("n", "toggle_unread", "Unread only"), Binding("enter", "detail", "Open"),
-        Binding("/", "remote_search", "Remote search"), Binding("ctrl+f", "local_search", "Local search"),
-        Binding("]", "remote_next", "Next remote result page"), Binding("[", "remote_previous", "Previous remote result page"),
-        Binding("p", "remote_previous", "Previous remote result page", show=False),
-        Binding("f", "forums", "Forums"), Binding("t", "tracked", "Tracked"),
-        Binding("b", "up", "Up"), Binding("r", "refresh", "Refresh"),
-        Binding("q", "back", "Back / quit"), Binding("?", "help", "Help"),
+        Binding("j", "next", "Nästa", show=False), Binding("k", "previous", "Föregående", show=False),
+        Binding("J", "next_unread", "Nästa olästa"), Binding("K", "previous_unread", "Föregående olästa"),
+        Binding("g", "first", "Första", show=False), Binding("G", "last", "Sista", show=False),
+        Binding("n", "toggle_unread", "Endast olästa"), Binding("enter", "detail", "Öppna"),
+        Binding("/", "remote_search", "Fjärrsökning"), Binding("ctrl+f", "local_search", "Lokal sökning"),
+        Binding("]", "remote_next", "Nästa resultatsida"), Binding("[", "remote_previous", "Föregående resultatsida"),
+        Binding("p", "remote_previous", "Föregående resultatsida", show=False),
+        Binding("f", "forums", "Forum"), Binding("t", "tracked", "Sparade"),
+        Binding("b", "up", "Upp"), Binding("r", "refresh", "Uppdatera"),
+        Binding("q", "back", "Tillbaka / avsluta"), Binding("?", "help", "Hjälp"),
     ]
 
     def __init__(self, db_path: Path, initial_thread: int | None = None) -> None:
@@ -115,14 +116,14 @@ class FlashbackApp(App[None]):
         yield Static(render_wordmark(80), id="brand-strip", markup=False)
         with Horizontal(id="body"):
             with Vertical(id="threads-panel"):
-                yield Label("THREADS", id="left-title", classes="panel-title")
+                yield Label(text("threads"), id="left-title", classes="panel-title")
                 yield ListView(id="thread-list")
             with Vertical(id="posts-panel"):
-                yield Label("POSTS", id="center-title", classes="panel-title")
+                yield Label(text("posts"), id="center-title", classes="panel-title")
                 yield ListView(id="post-list")
             with Vertical(id="detail-panel"):
-                yield Label("DETAIL", classes="panel-title")
-                yield Static(render_empty_state(40, 20), id="detail", markup=False, classes="empty-state")
+                yield Label(text("details"), classes="panel-title")
+                yield Static(render_overview(), id="detail", markup=False, classes="empty-state")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -147,15 +148,15 @@ class FlashbackApp(App[None]):
         view.clear()
         rows = self.database.tracked_thread_rows()
         for row in rows:
-            view.append(ThreadItem(int(row["thread_id"]), str(row["title"] or "untitled"), int(row["unread_count"]), int(row["post_count"])))
+            view.append(ThreadItem(int(row["thread_id"]), str(row["title"] or text("untitled")), int(row["unread_count"]), int(row["post_count"])))
         if rows:
             view.index = 0
 
     def _set_tracked_mode(self) -> None:
         self.forum_mode = False
         self.forum_stack.clear()
-        self.query_one("#left-title", Label).update("THREADS")
-        self.query_one("#center-title", Label).update("POSTS")
+        self.query_one("#left-title", Label).update(text("threads"))
+        self.query_one("#center-title", Label).update(text("posts"))
         self._load_threads()
         self.query_one("#thread-list", ListView).focus()
 
@@ -184,8 +185,8 @@ class FlashbackApp(App[None]):
         if left.children:
             # Keep the parent entry visible, but start on the first real item.
             left.index = 1 if current_id is not None and len(left.children) > 1 else 0
-        self.query_one("#left-title", Label).update(f"FORUMS · {self._forum_breadcrumb()}")
-        self.query_one("#center-title", Label).update("THREADS")
+        self.query_one("#left-title", Label).update(f"{text('forums')} · {self._forum_breadcrumb()}")
+        self.query_one("#center-title", Label).update(text("threads"))
         center = self.query_one("#post-list", ListView)
         center.clear()
         if current_id is not None:
@@ -213,13 +214,13 @@ class FlashbackApp(App[None]):
                     service.refresh_forum(section_id, force=True)
             self.call_from_thread(self._load_forum_level)
         except Exception as exc:
-            self.call_from_thread(self.notify, f"Navigation refresh failed; cached data remains available: {exc}", severity="warning")
+            self.call_from_thread(self.notify, f"{text('navigation_failed')}: {exc}", severity="warning")
 
     def _open_forum(self, section_id: int) -> None:
         self.forum_stack.append(section_id)
         self._load_forum_level()
         if self.navigation and not self.navigation.list_children(section_id) and not self.navigation.list_threads(section_id):
-            self.notify("Loading forum listing…")
+            self.notify(text("loading_forum"))
             self._start_navigation_refresh(section_id)
 
     def _open_forum_thread(self, thread_id: int) -> None:
@@ -230,14 +231,14 @@ class FlashbackApp(App[None]):
             return
         row = self.database.conn.execute("SELECT url FROM threads WHERE thread_id=?", (thread_id,)).fetchone()
         if not row:
-            self.notify("Thread listing has no usable URL.", severity="warning")
+            self.notify(text("no_thread_url"), severity="warning")
             return
-        self.notify("Ingesting thread…")
+        self.notify(text("ingesting"))
         self.run_worker(lambda: self._ingest_thread(thread_id, str(row["url"])), thread=True, exclusive=True)
 
     def _open_remote_result(self, result: SearchResult) -> None:
         if self.database is None or result.thread_id is None:
-            self.notify("Remote result has no resolvable thread target.", severity="warning")
+            self.notify(text("remote_no_thread"), severity="warning")
             return
         self.pending_post_id = result.post_id
         thread_url = f"https://www.flashback.org/t{result.thread_id}"
@@ -253,10 +254,10 @@ class FlashbackApp(App[None]):
                 database.store_page(parsed)
             self.call_from_thread(self._ingestion_finished, thread_id)
         except Exception as exc:
-            self.call_from_thread(self.notify, f"Could not ingest thread: {exc}", severity="error")
+            self.call_from_thread(self.notify, f"{text('ingest_failed')}: {exc}", severity="error")
 
     def _ingestion_finished(self, thread_id: int) -> None:
-        self.notify("Thread ready")
+        self.notify(text("thread_ready"))
         self._open_thread(thread_id)
 
     def _open_thread(self, thread_id: int) -> None:
@@ -294,18 +295,18 @@ class FlashbackApp(App[None]):
             view.index = 0
             self._show_post(self.visible_posts[0])
         else:
-            self.query_one("#detail", Static).update("No posts match this filter.")
+            self.query_one("#detail", Static).update(text("no_posts"))
 
     def _show_post(self, row: object) -> None:
         if self.database is None:
             return
-        lines = [f"POST #{row['post_id']}", str(row["username"]), str(row["posted_at"] or "unknown time"), "", "ORIGINAL TEXT", "─" * 24, str(row["text"])]
+        lines = [f"{text('post')} #{row['post_id']}", str(row["username"]), str(row["posted_at"] or text("unknown_time")), "", text("original"), "─" * 24, str(row["text"])]
         quotes = self.database.post_quotes(int(row["post_id"]))
         if quotes:
-            lines.extend(["", "QUOTED CONTENT", "─" * 24])
+            lines.extend(["", text("quoted"), "─" * 24])
             for quote in quotes:
-                lines.extend([f"> {quote['quoted_author'] or 'unknown user'}", f"> {quote['quote_text']}"])
-        lines.extend(["", f"SOURCE PAGE: {row['page']}", f"POSITION: {row['position_on_page'] or '?'}"])
+                lines.extend([f"> {quote['quoted_author'] or text('unknown_user')}", f"> {quote['quote_text']}"])
+        lines.extend(["", f"{text('source_page')}: {row['page']}", f"{text('position')}: {row['position_on_page'] or '?'}"])
         self.query_one("#detail", Static).update("\n".join(lines))
 
     def _mark_seen(self, row: object) -> None:
@@ -371,7 +372,7 @@ class FlashbackApp(App[None]):
         results = SearchService(self.database).search_posts(query, thread_id=self.thread_id)
         self.search_active = True
         self.search_mode = "local"
-        self.query_one("#center-title", Label).update(f"SEARCH LOCAL: {query}")
+        self.query_one("#center-title", Label).update(f"{text('search_local')}: {query}")
         rows = self.database.thread_posts(self.thread_id) if self.thread_id is not None else []
         by_id = {int(row["post_id"]): row for row in rows}
         self.visible_posts = [by_id[int(result.post_id)] for result in results if result.post_id in by_id]
@@ -383,7 +384,7 @@ class FlashbackApp(App[None]):
             view.index = 0
             self._show_post(self.visible_posts[0])
         else:
-            self.query_one("#detail", Static).update(f"No cached posts matched: {query}")
+            self.query_one("#detail", Static).update(f"{text('no_cached_matches')}: {query}")
 
     def _remote_query_submitted(self, query: str | None) -> None:
         if not query:
@@ -393,7 +394,7 @@ class FlashbackApp(App[None]):
         self._start_remote_search()
 
     def _start_remote_search(self) -> None:
-        self.notify("Searching Flashback…")
+        self.notify(text("searching"))
         self.run_worker(lambda: self._remote_search_worker(self.remote_query, self.remote_page), thread=True, exclusive=True)
 
     def _remote_search_worker(self, query: str, page: int) -> None:
@@ -402,7 +403,7 @@ class FlashbackApp(App[None]):
                 results = FlashbackSearchAdapter(fetcher).search(query, page=page)
             self.call_from_thread(self._show_remote_results, results)
         except Exception as exc:
-            self.call_from_thread(self.notify, f"Remote search failed; local content remains available: {exc}", severity="warning")
+            self.call_from_thread(self.notify, f"{text('search_failed')}: {exc}", severity="warning")
 
     def _show_remote_results(self, results: list[SearchResult]) -> None:
         self.remote_results = results
@@ -410,16 +411,16 @@ class FlashbackApp(App[None]):
         self.search_active = False
         self.thread_id = None
         self.forum_mode = False
-        self.query_one("#center-title", Label).update(f"SEARCH: {self.remote_query} · page {self.remote_page} · remote")
+        self.query_one("#center-title", Label).update(f"SÖK: {self.remote_query} · sida {self.remote_page} · fjärr")
         view = self.query_one("#post-list", ListView)
         view.clear()
         for result in results:
             view.append(RemoteSearchItem(result))
         if results:
             view.index = 0
-            self.query_one("#detail", Static).update("Select a remote result to open or ingest it.")
+            self.query_one("#detail", Static).update(text("remote_result_hint"))
         else:
-            self.query_one("#detail", Static).update("No remote results.")
+            self.query_one("#detail", Static).update(text("no_remote_results"))
         view.focus()
 
     def action_remote_next(self) -> None:
@@ -456,7 +457,7 @@ class FlashbackApp(App[None]):
             section_id = self.forum_stack[-1] if self.forum_stack else None
             self._start_navigation_refresh(section_id, force=True)
         elif self.thread_id is not None:
-            self.notify("Use fb sync for thread synchronization.")
+            self.notify(text("sync_hint"))
 
     def action_detail(self) -> None:
         view = self.query_one("#post-list", ListView)
@@ -470,7 +471,7 @@ class FlashbackApp(App[None]):
             self.remote_results = []
             self.remote_query = ""
             self.query_one("#post-list", ListView).clear()
-            self.query_one("#center-title", Label).update("POSTS")
+            self.query_one("#center-title", Label).update(text("posts"))
             self._set_tracked_mode()
             return
         if self.search_active:
@@ -480,7 +481,7 @@ class FlashbackApp(App[None]):
             return
         if self.thread_id is not None:
             self.thread_id = None; self.posts = []; self.visible_posts = []
-            self.query_one("#post-list", ListView).clear(); self.query_one("#detail", Static).update(render_empty_state(40, 20))
+            self.query_one("#post-list", ListView).clear(); self.query_one("#detail", Static).update(render_overview())
             if self.forum_mode:
                 self._load_forum_level()
             else:
@@ -517,7 +518,7 @@ class FlashbackApp(App[None]):
 
 class HelpScreen(Screen[None]):
     def compose(self) -> ComposeResult:
-        yield Static("FLASHBACK READER\n\n↑/↓ or j/k   move\nEnter         open / mark read\nJ/K           next / previous unread\ng/G           first / last\nn              unread-only / next remote page\n/              remote Flashback search\nCtrl-F         local cached search\n[ / ] / p      remote result pages\nq              back / quit\n?              this help\n\nPress q to close.", markup=False)
+        yield Static("BACKFLASH – HJÄLP\n\n↑/↓ eller j/k   flytta\nEnter            öppna / markera läst\nJ/K              nästa / föregående olästa\ng/G              första / sista\nn                endast olästa / nästa fjärrsida\n/                sök på Flashback\nCtrl-F           sök lokalt i sparat innehåll\n[ / ] / p        byt fjärrresultatsida\nq                tillbaka / avsluta\n?                visa denna hjälp\n\nTryck q för att stänga.", markup=False)
 
     def on_key(self, event: object) -> None:
         if getattr(event, "key", None) in {"q", "escape"}:
@@ -538,9 +539,9 @@ class SearchScreen(Screen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="search-box"):
-            yield Label("SEARCH FLASHBACK" if self.mode == "remote" else "SEARCH LOCAL")
-            yield Input(placeholder="keyword", id="search-input")
-            yield Label("Enter search · Escape cancel", classes="panel-title")
+            yield Label(text("search_remote") if self.mode == "remote" else text("search_local"))
+            yield Input(placeholder=text("search_placeholder"), id="search-input")
+            yield Label(text("search_submit"), classes="panel-title")
 
     def on_mount(self) -> None:
         self.query_one("#search-input", Input).focus()

@@ -21,10 +21,13 @@ dependencies = [
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.scripts]
-fb = "flashback_analyzer.cli:app"
+fb = "flashback_analyzer.launcher:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flashback_analyzer"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"backflash.ans" = "flashback_analyzer/backflash.ans"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -28,7 +28,7 @@ async def test_textual_reader_opens_navigates_quotes_and_persists_read_state(tmp
         await pilot.pause()
         assert app.thread_id == 999
         assert len(app.query_one("#post-list").children) == 2
-        assert "QUOTED CONTENT" in str(app.query_one("#detail").render())
+        assert "CITERAT INNEHÅLL" in str(app.query_one("#detail").render())
         await pilot.press("j")
         await pilot.pause()
         assert app.query_one("#post-list").index == 1
@@ -36,7 +36,7 @@ async def test_textual_reader_opens_navigates_quotes_and_persists_read_state(tmp
             assert db.reader_position(999) == 1002
         await pilot.press("?")
         await pilot.pause()
-        assert "FLASHBACK READER" in str(app.screen.query_one("Static").render())
+        assert "BACKFLASH – HJÄLP" in str(app.screen.query_one("Static").render())
         await pilot.press("q")
         await pilot.pause()
         await pilot.press("q")
@@ -61,7 +61,7 @@ async def test_textual_forum_mode_browses_cached_hierarchy_and_listing(tmp_path)
     async with app.run_test() as pilot:
         await pilot.press("f")
         await pilot.pause()
-        assert "FORUMS" in str(app.query_one("#left-title").render())
+        assert "FORUM" in str(app.query_one("#left-title").render())
         await pilot.press("enter")
         await pilot.pause()
         await pilot.press("enter")

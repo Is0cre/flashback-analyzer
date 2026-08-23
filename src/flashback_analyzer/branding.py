@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from .ui_strings import text
 
-_MEDIUM_MARK = "BACKFLASH // DISCOURSE OPS"
+
+_MEDIUM_MARK = "BACKFLASH // DISKURSÖVERVAKNING"
 _FULL_MARK = """┌─┐┌─┐┌─┬┐┌─┐┌─┐┬  ┌─┐┌─┐┬ ┬
 ├─┤├─┘│ ││├┤ ├─┤│  ├─┤├─┘├─┤
 ┴ ┴┴  ┴ ┴└─┘┴ ┴┴─┘┴ ┴┴  ┴ ┴"""
@@ -34,5 +36,10 @@ def render_empty_state(width: int, height: int, theme: str = "default") -> str:
     """Return restrained empty-state copy with an original tired-dog mark."""
 
     if width < 60 or height < 8:
-        return "BACKFLASH\n\nnothing selected.\nhumanity pending."
-    return f"{_DOG}\n\nBACKFLASH\nDOG AWAKE // CACHE WARM\n\nnothing selected.\nhumanity pending."
+        return "BACKFLASH\n\n" + text("empty")
+    return f"{_DOG}\n\nBACKFLASH\n{text('cache_warm')}\n\n{text('empty')}"
+
+
+def render_overview() -> str:
+    """Compact local-first landing state shown before a thread is selected."""
+    return "BACKFLASH // ÖVERSIKT\n\n" + text("select_thread")

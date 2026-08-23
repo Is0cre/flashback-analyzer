@@ -3,6 +3,7 @@ package polisen
 import (
 	"encoding/json"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +12,8 @@ import (
 )
 
 const Source = "polisen"
+
+var namedEventTime = regexp.MustCompile(`(?i)^\s*(\d{1,2})\s+(januari|februari|mars|april|maj|juni|juli|augusti|september|oktober|november|december)\s+(\d{1,2})[.:](\d{2})`)
 
 func Parse(data []byte, now time.Time) ([]external.ExternalEvent, error) {
 	var raw []apiEvent
@@ -23,10 +26,40 @@ func Parse(data []byte, now time.Time) ([]external.ExternalEvent, error) {
 		if err != nil {
 			eventTime = parseFlexibleTime(item.Datetime)
 		}
+		if eventTime.IsZero() {
+			eventTime = parseNamedEventTime(item.Name, now)
+		}
 		lat, lon := parseGPS(item.Location.GPS)
 		result = append(result, external.ExternalEvent{Source: Source, ExternalID: jsonValue(item.ID), Timestamp: eventTime, Title: strings.TrimSpace(item.Name), Summary: strings.TrimSpace(item.Summary), EventType: strings.TrimSpace(item.Type), LocationName: strings.TrimSpace(item.Location.Name), Latitude: lat, Longitude: lon, URL: normalizeURL(item.URL), FirstSeenAt: now, LastSeenAt: now})
 	}
 	return result, nil
+}
+
+func parseNamedEventTime(value string, now time.Time) time.Time {
+	match := namedEventTime.FindStringSubmatch(strings.TrimSpace(value))
+	if len(match) != 5 {
+		return time.Time{}
+	}
+	months := map[string]time.Month{
+		"januari": 1, "februari": 2, "mars": 3, "april": 4, "maj": 5, "juni": 6,
+		"juli": 7, "augusti": 8, "september": 9, "oktober": 10, "november": 11, "december": 12,
+	}
+	month, ok := months[strings.ToLower(match[2])]
+	if !ok {
+		return time.Time{}
+	}
+	day, _ := strconv.Atoi(match[1])
+	hour, _ := strconv.Atoi(match[3])
+	minute, _ := strconv.Atoi(match[4])
+	if day < 1 || hour > 23 || minute > 59 {
+		return time.Time{}
+	}
+	location := now.Location()
+	result := time.Date(now.Year(), month, day, hour, minute, 0, 0, location)
+	if result.After(now.Add(24 * time.Hour)) {
+		result = result.AddDate(-1, 0, 0)
+	}
+	return result
 }
 
 func parseFlexibleTime(value string) time.Time {

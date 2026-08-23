@@ -40,3 +40,14 @@ func TestParseDatetimeWithoutSeconds(t *testing.T) {
 		t.Fatalf("datum utan sekunder parsades fel: %#v", events)
 	}
 }
+
+func TestParseDatetimeFromSwedishEventName(t *testing.T) {
+	now := time.Date(2026, 8, 23, 14, 0, 0, 0, time.FixedZone("CEST", 2*60*60))
+	events, err := Parse([]byte(`[{"id":2,"datetime":"","name":"15 augusti 12.13, Brand, Boden","location":{}}]`), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Timestamp.IsZero() || events[0].Timestamp.Day() != 15 || events[0].Timestamp.Hour() != 12 || events[0].Timestamp.Minute() != 13 {
+		t.Fatalf("svensk eventtid parsades fel: %#v", events)
+	}
+}

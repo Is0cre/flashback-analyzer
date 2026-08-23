@@ -40,16 +40,17 @@ const (
 )
 
 type dataMsg struct {
-	kind       string
-	forums     []flashback.ForumNode
-	threads    []flashback.ThreadSummary
-	posts      []flashback.Post
-	results    []flashback.SearchResult
-	events     []external.ExternalEvent
-	detail     *external.ExternalEvent
-	refresh    bool
-	refreshURL string
-	err        error
+	kind          string
+	forums        []flashback.ForumNode
+	threads       []flashback.ThreadSummary
+	posts         []flashback.Post
+	results       []flashback.SearchResult
+	events        []external.ExternalEvent
+	detail        *external.ExternalEvent
+	refresh       bool
+	refreshURL    string
+	refreshParent string
+	err           error
 }
 
 type dashboardMsg struct {
@@ -151,6 +152,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				target := m.refreshURL
 				if target == "" {
 					target = flashback.BaseURL
+				}
+				if m.refreshParent != "" {
+					return a, refreshForumNavigation(a.Store, a.Client, target, m.refreshParent)
 				}
 				return a, refreshNavigation(a.Store, a.Client, target)
 			}
@@ -403,6 +407,7 @@ func (a App) View() string {
 		b.WriteString(titleStyle.Render("POLISHÄNDELSER"))
 		b.WriteString("\n\n")
 		b.WriteString(renderEvents(a.Events, a.Cursor))
+		b.WriteString("\n\n" + renderPoliceMap(a.Events, a.Width))
 		if a.EventDetail != nil {
 			b.WriteString("\n\n" + renderEventDetail(*a.EventDetail))
 		}
@@ -513,6 +518,75 @@ func renderEventDetail(e external.ExternalEvent) string {
 	if e.URL != "" {
 		b.WriteString("\n\nKÄLLA      " + e.URL)
 	}
+	return b.String()
+}
+
+func renderPoliceMap(events []external.ExternalEvent, width int) string {
+	mapWidth := width - 4
+	if mapWidth <= 0 || mapWidth > 68 {
+		mapWidth = 64
+	}
+	const mapHeight = 16
+	grid := make([][]rune, mapHeight)
+	for y := range grid {
+		grid[y] = make([]rune, mapWidth)
+		for x := range grid[y] {
+			grid[y][x] = ' '
+		}
+	}
+	// A restrained terminal silhouette: the coordinates, rather than the
+	// artwork, are authoritative. It remains useful when terminal graphics
+	// are unavailable and can later be replaced by a richer ANSI asset.
+	outline := []string{
+		"                         ╭──╮",
+		"                       ╭─╯  ╰╮",
+		"                      ╭╯     │",
+		"                     ╭╯      │",
+		"                    ╭╯       │",
+		"                   ╭╯        │",
+		"                  ╭╯         │",
+		"                 ╭╯          │",
+		"                ╭╯           │",
+		"               ╭╯            │",
+		"              ╭╯             │",
+		"             ╭╯              │",
+		"            ╭╯               │",
+		"           ╰╮               ╭╯",
+		"            ╰───────────────╯",
+		"                 ╰──────╯",
+	}
+	for y, line := range outline {
+		start := (mapWidth - len([]rune(line))) / 2
+		for x, r := range []rune(line) {
+			if start+x >= 0 && start+x < mapWidth {
+				grid[y][start+x] = r
+			}
+		}
+	}
+	points := 0
+	for _, event := range events {
+		if event.Latitude == nil || event.Longitude == nil {
+			continue
+		}
+		// Sweden roughly spans 55–69°N and 10–24°E.
+		x := int((*event.Longitude - 10) / 14 * float64(mapWidth-1))
+		y := int((69 - *event.Latitude) / 14 * float64(mapHeight-1))
+		if x < 0 || x >= mapWidth || y < 0 || y >= mapHeight {
+			continue
+		}
+		grid[y][x] = '●'
+		points++
+	}
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("KARTA · POLISHÄNDELSER") + "\n")
+	if points == 0 {
+		b.WriteString(muted.Render("Inga händelser med koordinater."))
+		return b.String()
+	}
+	for _, row := range grid {
+		b.WriteString(string(row) + "\n")
+	}
+	b.WriteString(muted.Render(fmt.Sprintf("● %d händelser · 55–69°N · 10–24°E", points)))
 	return b.String()
 }
 
@@ -837,7 +911,7 @@ func loadForumChildren(s *store.Store, c *flashback.Client, n flashback.ForumNod
 			}
 			if len(out) > 0 {
 				state, _ := s.ExternalSyncState(navigationSource + ":" + n.ID)
-				return dataMsg{kind: "forums", forums: out, refresh: state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 24*time.Hour, refreshURL: n.URL}
+				return dataMsg{kind: "forums", forums: out, refresh: state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 24*time.Hour, refreshURL: n.URL, refreshParent: n.ID}
 			}
 		}
 		if cached, err := cachedThreads(s, n.ID); err == nil && len(cached) > 0 {
@@ -906,6 +980,35 @@ func refreshNavigation(s *store.Store, c *flashback.Client, rawURL string) tea.C
 			}
 		}
 		return dataMsg{kind: "forums", forums: roots}
+	}
+}
+
+func refreshForumNavigation(s *store.Store, c *flashback.Client, rawURL, parentID string) tea.Cmd {
+	return func() tea.Msg {
+		nodes, err := c.Forum(context.Background(), rawURL)
+		if err != nil {
+			return dataMsg{kind: "forums", err: err}
+		}
+		if err = s.SaveForums(nodes); err != nil {
+			return dataMsg{kind: "forums", err: err}
+		}
+		_ = s.SetExternalSyncState(external.SyncState{Source: navigationSource + ":" + parentID, LastSyncedAt: time.Now(), Status: "ok"})
+		rows, err := s.Forums(parentID)
+		if err != nil {
+			return dataMsg{kind: "forums", err: err}
+		}
+		defer rows.Close()
+		var children []flashback.ForumNode
+		for rows.Next() {
+			var child flashback.ForumNode
+			var hasChildren int
+			if scanErr := rows.Scan(&child.ID, &child.Title, &child.URL, &hasChildren); scanErr != nil {
+				return dataMsg{kind: "forums", err: scanErr}
+			}
+			child.HasChildren = hasChildren != 0
+			children = append(children, child)
+		}
+		return dataMsg{kind: "forums", forums: children}
 	}
 }
 func loadForum(s *store.Store, c *flashback.Client, n flashback.ForumNode) tea.Cmd {

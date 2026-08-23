@@ -77,6 +77,22 @@ func ParseThreadListing(html, sourceURL, forumID string) ([]ThreadSummary, error
 	}
 	result := []ThreadSummary{}
 	seen := map[string]bool{}
+	add := func(a, row *goquery.Selection) {
+		href := mustAttr(a, "href")
+		full := NormalizeURL(href, sourceURL)
+		id := ThreadID(full)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		text := clean(row.Text())
+		ts := ThreadSummary{ID: id, Title: clean(a.Text()), URL: full, ForumID: forumID, Author: clean(row.Find(".author, [data-author], .username").First().Text()), Replies: findCount(text, `(?i)([0-9][0-9\s\x{00a0}.,]*)\s*svar`), Views: findCount(text, `(?i)([0-9][0-9\s\x{00a0}.,]*)\s*visningar`), LastPostAuthor: clean(row.Find(".last-post-author, [data-last-author]").First().Text()), Sticky: strings.Contains(strings.ToLower(row.AttrOr("class", "")), "sticky") || strings.Contains(strings.ToLower(text), "klistrad")}
+		if t, ok := row.Find("time[datetime], time").First().Attr("datetime"); ok {
+			ts.LastPostAt = parseTime(t)
+		}
+		ts.PageCount = maxPage(row.Text())
+		result = append(result, ts)
+	}
 	// Flashback has used more than one forum-list presentation. These are
 	// thread-item containers, not a page-wide anchor scan; the URL classifier
 	// remains the second guard against authors, pagination and breadcrumbs.
@@ -97,24 +113,29 @@ func ParseThreadListing(html, sourceURL, forumID string) ([]ThreadSummary, error
 				return ClassifyURL(href, sourceURL) == LinkThread
 			}).First()
 		}
-		if a.Length() == 0 {
-			return
+		if a.Length() > 0 {
+			add(a, row)
 		}
-		href := mustAttr(a, "href")
-		full := NormalizeURL(href, sourceURL)
-		id := ThreadID(full)
-		if id == "" || seen[id] {
-			return
-		}
-		seen[id] = true
-		text := clean(row.Text())
-		ts := ThreadSummary{ID: id, Title: clean(a.Text()), URL: full, ForumID: forumID, Author: clean(row.Find(".author, [data-author], .username").First().Text()), Replies: findCount(text, `(?i)([0-9][0-9\s\x{00a0}.,]*)\s*svar`), Views: findCount(text, `(?i)([0-9][0-9\s\x{00a0}.,]*)\s*visningar`), LastPostAuthor: clean(row.Find(".last-post-author, [data-last-author]").First().Text()), Sticky: strings.Contains(strings.ToLower(row.AttrOr("class", "")), "sticky") || strings.Contains(strings.ToLower(text), "klistrad")}
-		if t, ok := row.Find("time[datetime], time").First().Attr("datetime"); ok {
-			ts.LastPostAt = parseTime(t)
-		}
-		ts.PageCount = maxPage(row.Text())
-		result = append(result, ts)
 	})
+	if len(result) == 0 {
+		// Older forumdisplay templates do not wrap each row in one of the
+		// modern item classes above. Scope the fallback to known thread-list
+		// containers, then use the nearest semantic row for metadata.
+		fallback := "#threadlist a[href], #threads a[href], " +
+			".forumdisplay a[href], .threadlist a[href], " +
+			"table[id^='threadbits'] a[href], table[id*='thread'] a[href]"
+		doc.Find(fallback).Each(func(_ int, a *goquery.Selection) {
+			href := mustAttr(a, "href")
+			if ClassifyURL(href, sourceURL) != LinkThread {
+				return
+			}
+			row := a.ParentsFiltered("tr, li, article, .structItem, .threadbit, .thread-row").First()
+			if row.Length() == 0 {
+				row = a.Parent()
+			}
+			add(a, row)
+		})
+	}
 	return result, nil
 }
 

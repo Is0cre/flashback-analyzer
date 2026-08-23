@@ -81,6 +81,16 @@ func TestParseThreadListingSupportsLegacyThreadRows(t *testing.T) {
 	}
 }
 
+func TestParseThreadListingUsesScopedForumdisplayFallback(t *testing.T) {
+	rows, err := ParseThreadListing(fixture(t, "forum_listing_forumdisplay.html"), BaseURL+"f3-droger", "3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != "4001" || rows[0].Title != "Forumdisplay-tråd" {
+		t.Fatalf("forumdisplay-fallback parsades fel: %#v", rows)
+	}
+}
+
 func TestParseSearchResults(t *testing.T) {
 	rows, err := ParseSearchResults(fixture(t, "search_results.html"), BaseURL)
 	if err != nil {

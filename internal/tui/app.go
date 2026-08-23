@@ -14,6 +14,7 @@ import (
 	"github.com/backflash-cli/backflash/internal/flashback"
 	"github.com/backflash-cli/backflash/internal/gandr"
 	"github.com/backflash-cli/backflash/internal/mesh"
+	meshruntime "github.com/backflash-cli/backflash/internal/mesh/runtime"
 	"github.com/backflash-cli/backflash/internal/service"
 	"github.com/backflash-cli/backflash/internal/store"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -54,6 +55,13 @@ type dashboardMsg struct {
 	snapshot service.DashboardSnapshot
 	err      error
 }
+
+type meshMsg struct {
+	snapshot meshruntime.Snapshot
+	err      error
+}
+
+type meshTickMsg struct{}
 type App struct {
 	Store        *store.Store
 	Client       *flashback.Client
@@ -77,6 +85,8 @@ type App struct {
 	Dashboard    service.DashboardSnapshot
 	DashboardSvc *service.DashboardService
 	Gandr        *gandr.Subsystem
+	MeshRuntime  *meshruntime.Runtime
+	MeshState    meshruntime.Snapshot
 }
 
 var (
@@ -94,8 +104,9 @@ func New(s *store.Store, c *flashback.Client) App {
 	input.CharLimit = 200
 	eventClient := polisen.NewClient(nil, nil)
 	eventService := &service.ExternalEventsService{Store: s, Provider: eventClient, RefreshAfter: 2 * time.Minute, Now: time.Now}
-	dashboard := &service.DashboardService{Store: s, Now: time.Now, MeshConfigured: mesh.Load().Enabled}
-	return App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1, EventService: eventService, DashboardSvc: dashboard, Gandr: gandr.New()}
+	meshConfig := mesh.Load()
+	dashboard := &service.DashboardService{Store: s, Now: time.Now, MeshConfigured: meshConfig.Enabled}
+	return App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1, EventService: eventService, DashboardSvc: dashboard, Gandr: gandr.New(), MeshRuntime: meshruntime.New(meshConfig)}
 }
 
 func Splash(w io.Writer, width int) {
@@ -116,7 +127,7 @@ func Splash(w io.Writer, width int) {
 }
 
 func (a App) Init() tea.Cmd {
-	return tea.Batch(loadCachedEvents(a.EventService), loadDashboard(a.DashboardSvc))
+	return tea.Batch(loadCachedEvents(a.EventService), loadDashboard(a.DashboardSvc), startMesh(a.MeshRuntime))
 }
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
@@ -166,6 +177,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.Dashboard = m.snapshot
+	case meshMsg:
+		a.MeshState = m.snapshot
+		a.Dashboard.Mesh = meshStateLabel(m.snapshot.State)
+		if m.err != nil {
+			a.Status = "MESH · FEL"
+		}
+		if m.snapshot.State == meshruntime.Disabled {
+			return a, nil
+		}
+		return a, meshTick()
+	case meshTickMsg:
+		if a.MeshRuntime == nil {
+			return a, nil
+		}
+		a.MeshState = a.MeshRuntime.Snapshot()
+		a.Dashboard.Mesh = meshStateLabel(a.MeshState.State)
+		return a, meshTick()
 	case tea.KeyMsg:
 		if a.Input.Focused() {
 			if m.String() == "enter" {
@@ -366,11 +394,7 @@ func (a App) View() string {
 		}
 	case ViewMesh:
 		b.WriteString(titleStyle.Render("CACHE-MESH"))
-		status := "Publik cache-mesh är inte aktiverad."
-		if a.Dashboard.Mesh == "VALD" {
-			status = "Mesh är vald men transporten är inte startad ännu."
-		}
-		b.WriteString("\n\nYGGDRASIL   " + a.Dashboard.Mesh + "\nSTATUS      " + status + "\n\n" + muted.Render("Mesh är opt-in och har ingen koppling till Gandr-identitet."))
+		b.WriteString(renderMeshDetail(a.MeshState))
 	case ViewGandr:
 		b.WriteString(titleStyle.Render("ᚷ GANDR"))
 		b.WriteString("\n\nVAULT       LÅST\n\nGandr startas inte automatiskt. Lås upp subsystemet explicit när det behövs.\n\n" + muted.Render("Gandr-identitet, privat databas och petnames hålls separerade från BACKFLASH."))
@@ -557,6 +581,62 @@ func loadDashboard(dashboard *service.DashboardService) tea.Cmd {
 		snapshot, err := dashboard.Snapshot(context.Background())
 		return dashboardMsg{snapshot: snapshot, err: err}
 	}
+}
+
+func startMesh(runtime *meshruntime.Runtime) tea.Cmd {
+	return func() tea.Msg {
+		if runtime == nil {
+			return meshMsg{}
+		}
+		err := runtime.Start(context.Background())
+		return meshMsg{snapshot: runtime.Snapshot(), err: err}
+	}
+}
+
+func meshTick() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return meshTickMsg{} })
+}
+
+func meshStateLabel(state meshruntime.State) string {
+	switch state {
+	case meshruntime.Disabled:
+		return "AV"
+	case meshruntime.Configured:
+		return "VALD"
+	case meshruntime.Starting:
+		return "STARTAR"
+	case meshruntime.Running:
+		return "PÅ"
+	case meshruntime.Degraded:
+		return "DEGRADED"
+	case meshruntime.Stopping:
+		return "STOPPAR"
+	case meshruntime.Error:
+		return "FEL"
+	default:
+		return "—"
+	}
+}
+
+func renderMeshDetail(snapshot meshruntime.Snapshot) string {
+	var b strings.Builder
+	b.WriteString("\n\nSTATUS      " + meshStateLabel(snapshot.State))
+	b.WriteString("\nDELNING     " + map[bool]string{true: "PÅ", false: "AV"}[snapshot.ShareCache])
+	b.WriteString("\nIDENTITET   " + snapshot.Identity)
+	b.WriteString(fmt.Sprintf("\nPEERS       %d\nOBJEKT      %d", snapshot.Peers, snapshot.Objects))
+	if snapshot.LastError != "" {
+		b.WriteString("\nFEL         " + snapshot.LastError)
+	}
+	b.WriteString("\n\n" + muted.Render("Endast publika cacheobjekt. Ingen Gandr-identitet, cookie eller läshistorik delas."))
+	return b.String()
+}
+
+// Shutdown is called by the process owner after Bubble Tea exits.
+func (a App) Shutdown() error {
+	if a.MeshRuntime == nil {
+		return nil
+	}
+	return a.MeshRuntime.Stop()
 }
 
 func loadRoot(s *store.Store, c *flashback.Client) tea.Cmd {

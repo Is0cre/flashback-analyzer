@@ -1,0 +1,25 @@
+[Unit]
+Description=BACKFLASH offentlig cache-peer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=backflash
+Group=backflash
+ExecStart=/usr/local/bin/backflash-cache
+Environment=BACKFLASH_CONFIG=/etc/backflash/config.toml
+Environment=XDG_DATA_HOME=/var/lib/backflash
+Restart=on-failure
+RestartSec=10s
+
+# Noden får bara skriva sin publika mesh-cache och sin identitet.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/backflash
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

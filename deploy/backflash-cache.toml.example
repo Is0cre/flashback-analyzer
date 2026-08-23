@@ -1,0 +1,15 @@
+# BACKFLASH offentlig cache-peer för Debian/Ubuntu.
+# Kopiera till /etc/backflash/config.toml och ändra lyssnare/peers.
+
+[mesh]
+enabled = true
+share_cache = true
+
+# Lyssna på den privata Yggdrasil-adressen eller en lokal testadress.
+listen = ["tcp://0.0.0.0:4242"]
+
+# Lägg till kända Yggdrasil-peers här. Lämna tomt om peering läggs till senare.
+peers = []
+
+# Valfritt: kontrollera den peer som cacheförfrågningar skickas till.
+# peer_key = ""

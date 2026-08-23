@@ -15,6 +15,7 @@ from .topics import discover_topics
 from .textual_app import launch_textual_tui
 from .questions import discover_questions
 from .urls import parse_thread_ref
+from .adapters.flashback.navigation import diagnose_nav
 
 app = typer.Typer(no_args_is_help=False, help="Read-only Flashback thread analyzer.")
 console = Console()
@@ -58,6 +59,19 @@ def ingest(
             console.print(f"[green]Sida {page}:[/] {count} inlägg")
 
     console.print(f"\nKlar. Databas: [bold]{db}[/]")
+
+
+@app.command("debug-nav")
+def debug_nav(
+    url: str = typer.Argument("https://www.flashback.org/", help="Flashback page to inspect."),
+    refresh: bool = typer.Option(False, help="Ignore the HTML cache."),
+    cache: Path = typer.Option(DEFAULT_CACHE, help="HTML cache directory."),
+) -> None:
+    """Show accepted/rejected forum-navigation links and their URL classes."""
+    with Fetcher(cache) as fetcher:
+        html = fetcher.fetch_url(url, refresh=refresh)
+    for decision, kind, href, title in diagnose_nav(html, url):
+        console.print(f"{decision} {kind.value.upper()}\n{href}\n{title}\n", markup=False)
 
 
 @app.command()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -30,9 +31,10 @@ class PostItem(ListItem):
 
 
 class ForumItem(ListItem):
-    def __init__(self, section_id: int, title: str, is_browsable: bool) -> None:
+    def __init__(self, section_id: int, title: str, has_children: bool) -> None:
         self.section_id = section_id
-        super().__init__(Label(f"{title}{'  ›' if is_browsable else ''}", markup=False))
+        label = f"{title}{'  ›' if has_children else ''}"
+        super().__init__(Label(Text(label, overflow="ellipsis", no_wrap=True), markup=False))
 
 
 class ForumBackItem(ListItem):
@@ -53,7 +55,7 @@ class FlashbackApp(App[None]):
     CSS = """
     Screen { background: $surface; }
     #body { height: 1fr; }
-    #threads-panel { width: 30; min-width: 24; border: solid $primary; }
+    #threads-panel { width: 34; min-width: 28; border: solid $primary; }
     #posts-panel { width: 2fr; border: solid $primary; }
     #detail-panel { width: 1fr; min-width: 34; border: solid $primary; padding: 1; overflow-y: auto; }
     .panel-title { height: 1; background: $primary; color: $text; padding: 0 1; }
@@ -152,7 +154,7 @@ class FlashbackApp(App[None]):
         if current_id is not None:
             left.append(ForumBackItem())
         for row in rows:
-            left.append(ForumItem(int(row["id"]), str(row["title"]), bool(row["is_browsable"])))
+            left.append(ForumItem(int(row["id"]), str(row["title"]), bool(row["has_children"])))
         if left.children:
             # Keep the parent entry visible, but start on the first real item.
             left.index = 1 if current_id is not None and len(left.children) > 1 else 0

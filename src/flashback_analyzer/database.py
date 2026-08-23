@@ -8,7 +8,7 @@ from .models import ParsedPage
 from .navigation import ForumNode, ThreadSummary
 from .urls import normalize_url, thread_page_url, url_domain
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -152,6 +152,7 @@ CREATE TABLE IF NOT EXISTS forum_sections (
     parent_id INTEGER REFERENCES forum_sections(id) ON DELETE CASCADE,
     sort_order INTEGER NOT NULL DEFAULT 0,
     is_browsable INTEGER NOT NULL DEFAULT 0,
+    has_children INTEGER NOT NULL DEFAULT 0,
     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(source, url)
 );
@@ -198,6 +199,7 @@ class Database:
             "stances": {"prompt_version": "TEXT", "analysis_version": "TEXT", "input_hash": "TEXT"},
             "questions": {"method": "TEXT NOT NULL DEFAULT 'manual'", "confidence": "REAL NOT NULL DEFAULT 1.0", "input_hash": "TEXT"},
             "forum_threads": {"author": "TEXT", "reply_count": "INTEGER", "view_count": "INTEGER", "last_post_at": "TEXT", "last_post_author": "TEXT", "page_count": "INTEGER"},
+            "forum_sections": {"has_children": "INTEGER NOT NULL DEFAULT 0"},
         }
         for table, columns in migrations.items():
             existing = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
@@ -365,12 +367,14 @@ class Database:
 
         for node in nodes:
             self.conn.execute("""INSERT INTO forum_sections
-                (source, title, url, forum_id, sort_order, is_browsable, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                (source, title, url, forum_id, sort_order, is_browsable, has_children, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(source, url) DO UPDATE SET title=excluded.title,
                 forum_id=excluded.forum_id, sort_order=excluded.sort_order,
-                is_browsable=excluded.is_browsable, last_seen_at=CURRENT_TIMESTAMP""",
-                (node.source, node.title, node.url, node.external_id, node.sort_order, int(node.is_browsable)))
+                is_browsable=excluded.is_browsable, has_children=excluded.has_children,
+                last_seen_at=CURRENT_TIMESTAMP""",
+                (node.source, node.title, node.url, node.external_id, node.sort_order,
+                 int(node.is_browsable), int(node.has_children)))
         for node in nodes:
             parent_id = None
             if node.parent_url:

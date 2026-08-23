@@ -15,6 +15,7 @@ class ForumNode:
     sort_order: int = 0
     external_id: str | None = None
     is_browsable: bool = False
+    has_children: bool = False
 
 
 @dataclass(frozen=True)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from dataclasses import replace
+from enum import Enum
 from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup, Tag
@@ -12,9 +14,19 @@ from ...navigation import ForumNode, ThreadSummary
 
 SOURCE = "flashback"
 BASE_URL = "https://www.flashback.org/"
-_FORUM_ID_RE = re.compile(r"/(?:f|forum|forums?)[/-]?(\d+)(?:[^/]*)?(?:/|$)", re.I)
-_THREAD_RE = re.compile(r"/(?:t|threads?)[/-]?(\d+)(?:p\d+)?(?:-[^/]*)?(?:/|$)", re.I)
+_FORUM_PATH_RE = re.compile(r"^/f(\d+)(?:-[^/]*)?$", re.I)
+_FORUM_LAST_POST_RE = re.compile(r"^/f\d+lp$", re.I)
+_THREAD_PATH_RE = re.compile(r"^/t(\d+)(?:p\d+)?n?(?:-[^/]*)?$", re.I)
+_POST_PATH_RE = re.compile(r"^/p\d+$", re.I)
 _NUMBER_RE = re.compile(r"\d[\d\s\u00a0.,]*")
+
+
+class FlashbackLinkType(Enum):
+    FORUM = "forum"
+    THREAD = "thread"
+    POST = "post"
+    USER = "user"
+    OTHER = "other"
 
 
 def normalize_url(href: str, base_url: str = BASE_URL) -> str:
@@ -29,8 +41,29 @@ def normalize_url(href: str, base_url: str = BASE_URL) -> str:
     return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), path, "", query, ""))
 
 
+def classify_flashback_url(href: str, base_url: str = BASE_URL) -> FlashbackLinkType:
+    """Classify observed Flashback URL forms without looking at link text.
+
+    Forum rows use ``/f<ID>-slug``. Last-post author links use the deceptively
+    similar ``/f<ID>lp`` form, which is why a loose ``/f<ID>`` regex is unsafe.
+    """
+
+    url = normalize_url(href, base_url)
+    parsed = urlparse(url)
+    path = parsed.path
+    if _FORUM_PATH_RE.fullmatch(path) or (parsed.query and parse_qs(parsed.query).get("f")):
+        return FlashbackLinkType.FORUM
+    if _FORUM_LAST_POST_RE.fullmatch(path) or re.fullmatch(r"/u\d+", path, re.I):
+        return FlashbackLinkType.USER
+    if _THREAD_PATH_RE.fullmatch(path):
+        return FlashbackLinkType.THREAD
+    if _POST_PATH_RE.fullmatch(path) or path.endswith("/showpost.php") and "p" in parse_qs(parsed.query):
+        return FlashbackLinkType.POST
+    return FlashbackLinkType.OTHER
+
+
 def _forum_id(url: str) -> str | None:
-    match = _FORUM_ID_RE.search(urlparse(url).path)
+    match = _FORUM_PATH_RE.fullmatch(urlparse(url).path)
     if match:
         return match.group(1)
     query = parse_qs(urlparse(url).query)
@@ -38,15 +71,8 @@ def _forum_id(url: str) -> str | None:
 
 
 def _thread_id(url: str) -> int | None:
-    match = _THREAD_RE.search(urlparse(url).path)
+    match = _THREAD_PATH_RE.fullmatch(urlparse(url).path)
     return int(match.group(1)) if match else None
-
-
-def _is_forum_url(url: str) -> bool:
-    # Flashback user/profile links can contain words such as "forum" and
-    # must never become navigation nodes. The numeric forum identifier is the
-    # reliable discriminator for the current adapter.
-    return _forum_id(url) is not None
 
 
 def _text(node: Tag | None) -> str:
@@ -54,47 +80,75 @@ def _text(node: Tag | None) -> str:
 
 
 def parse_navbar(html: str, source_url: str = BASE_URL) -> list[ForumNode]:
-    """Extract forum links and their DOM-derived parent relationships.
+    """Extract only forum cells from Flashback's actual forum-list tables.
 
-    The parser uses semantic links and ``li`` ancestry. It does not depend on
-    menu coordinates or a fixed number of hierarchy levels.
+    On the live site, homepage/forum navigation is represented by a
+    ``table.forumslist``. Forum links are in ``td.td_forum``; the adjacent
+    last-post cell contains thread and author links, including ``/f<ID>lp``
+    author links. Restricting extraction to the forum cell plus strict URL
+    classification excludes those links structurally and independently.
     """
 
     soup = BeautifulSoup(html, "html.parser")
-    anchors = [a for a in soup.select("nav a[href], a[href]") if _text(a)]
     result: list[ForumNode] = []
-    seen: set[str] = set()
-    for order, anchor in enumerate(anchors):
+    by_url: dict[str, int] = {}
+
+    def add(anchor: Tag, parent_url: str | None, order: int, has_children: bool) -> None:
         href = anchor.get("href")
         if not isinstance(href, str):
-            continue
+            return
         url = normalize_url(href, source_url)
-        if url in seen or not _is_forum_url(url):
-            continue
-        seen.add(url)
+        if classify_flashback_url(url) is not FlashbackLinkType.FORUM:
+            return
+        title = _text(anchor)
+        if not title:
+            return
+        node = ForumNode(SOURCE, title, url, parent_url, order, _forum_id(url), True, has_children)
+        existing = by_url.get(url)
+        if existing is None:
+            by_url[url] = len(result)
+            result.append(node)
+        elif has_children and not result[existing].has_children:
+            result[existing] = replace(result[existing], has_children=True)
+
+    order = 0
+    for table in soup.select("table.forumslist"):
+        parent_anchor = None
+        category = table.find_previous("div", class_="navbar-forum")
+        if category:
+            parent_anchor = category.select_one("a.forum-title[href]")
+        if parent_anchor is None:
+            breadcrumb = table.find_previous("div", class_="list-forum-title")
+            if breadcrumb:
+                parent_anchor = breadcrumb.select_one("ol.breadcrumb a[href]")
         parent_url = None
-        own_li = anchor.find_parent("li")
-        if own_li:
-            parent_li = own_li.find_parent("li")
-            while parent_li and parent_url is None:
-                parent_anchor = parent_li.find("a", href=True, recursive=False)
-                if parent_anchor:
-                    candidate = normalize_url(str(parent_anchor["href"]), source_url)
-                    if candidate != url and _is_forum_url(candidate):
-                        parent_url = candidate
-                parent_li = parent_li.find_parent("li")
-        result.append(
-            ForumNode(
-                source=SOURCE,
-                title=_text(anchor),
-                url=url,
-                parent_url=parent_url,
-                sort_order=order,
-                external_id=_forum_id(url),
-                is_browsable=True,
-            )
-        )
+        if parent_anchor:
+            parent_url = normalize_url(str(parent_anchor["href"]), source_url)
+            add(parent_anchor, None, order, True)
+            order += 1
+        forum_cells = table.select("td.td_forum")
+        for cell in forum_cells:
+            anchor = cell.select_one("a[href]")
+            if anchor is None:
+                continue
+            add(anchor, parent_url, order, bool(cell.select_one("table.forumslist")))
+            order += 1
     return result
+
+
+def diagnose_nav(html: str, source_url: str = BASE_URL) -> list[tuple[str, FlashbackLinkType, str, str]]:
+    """Return developer diagnostics for links in known forum-list context."""
+
+    soup = BeautifulSoup(html, "html.parser")
+    rows: list[tuple[str, FlashbackLinkType, str, str]] = []
+    for anchor in soup.select("table.forumslist a[href], div.navbar-forum a[href], div.list-forum-title a[href], nav a[href]"):
+        href = str(anchor.get("href", ""))
+        kind = classify_flashback_url(href, source_url)
+        in_forum_cell = anchor.find_parent("td", class_="td_forum") is not None
+        is_category = "forum-title" in (anchor.get("class") or []) or anchor.find_parent("div", class_="list-forum-title") is not None
+        accepted = kind is FlashbackLinkType.FORUM and (in_forum_cell or is_category)
+        rows.append(("ACCEPT" if accepted else "REJECT", kind, normalize_url(href, source_url), _text(anchor)))
+    return rows
 
 
 def _parse_number(value: str) -> int | None:

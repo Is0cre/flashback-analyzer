@@ -100,7 +100,7 @@ var (
 // Bump this when the persisted navigation shape/parser changes. It causes
 // one background refresh instead of trusting a snapshot written by the old
 // flat-root bug.
-const navigationSource = "flashback:navigation:v2"
+const navigationSource = "flashback:navigation:v3"
 
 func New(s *store.Store, c *flashback.Client) App {
 	input := textinput.New()

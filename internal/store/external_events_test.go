@@ -41,5 +41,8 @@ func TestExternalEventsSurviveRestartAndUpsert(t *testing.T) {
 	if len(events) != 1 || events[0].Title != "Uppdaterad" {
 		t.Fatalf("unexpected persisted events: %#v", events)
 	}
+	if events[0].Timestamp.IsZero() || events[0].Timestamp.Year() != 2026 || events[0].Timestamp.Hour() != 12 {
+		t.Fatalf("eventtid återlästes inte: %#v", events[0].Timestamp)
+	}
 	_ = db.Close()
 }

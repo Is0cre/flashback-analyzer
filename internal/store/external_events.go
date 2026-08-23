@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/backflash-cli/backflash/internal/external"
@@ -53,13 +54,13 @@ func ExternalEventFromRows(rows *sql.Rows) ([]external.ExternalEvent, error) {
 			return nil, err
 		}
 		if eventTime.Valid {
-			e.Timestamp, _ = time.Parse(time.RFC3339Nano, eventTime.String)
+			e.Timestamp = parseStoredTime(eventTime.String)
 		}
 		if first.Valid {
-			e.FirstSeenAt, _ = time.Parse(time.RFC3339Nano, first.String)
+			e.FirstSeenAt = parseStoredTime(first.String)
 		}
 		if last.Valid {
-			e.LastSeenAt, _ = time.Parse(time.RFC3339Nano, last.String)
+			e.LastSeenAt = parseStoredTime(last.String)
 		}
 		if lat.Valid {
 			v := lat.Float64
@@ -72,4 +73,21 @@ func ExternalEventFromRows(rows *sql.Rows) ([]external.ExternalEvent, error) {
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+func parseStoredTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05 -0700 MST",
+		"2006-01-02 15:04:05 -0700",
+		"2006-01-02 15:04:05",
+	} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
 }

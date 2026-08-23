@@ -101,9 +101,26 @@ func ParseThreadListing(html, sourceURL, forumID string) ([]ThreadSummary, error
 		}
 		seen[id] = true
 		text := clean(row.Text())
-		ts := ThreadSummary{ID: id, Title: clean(a.Text()), URL: full, ForumID: forumID, Author: clean(row.Find(".author, [data-author], .username").First().Text()), Replies: findCount(text, `(?i)([0-9][0-9\s\x{00a0}.,]*)\s*svar`), Views: findCount(text, `(?i)([0-9][0-9\s\x{00a0}.,]*)\s*visningar`), LastPostAuthor: clean(row.Find(".last-post-author, [data-last-author]").First().Text()), Sticky: strings.Contains(strings.ToLower(row.AttrOr("class", "")), "sticky") || strings.Contains(strings.ToLower(text), "klistrad")}
+		title := clean(a.Text())
+		if title == "" {
+			title = clean(a.AttrOr("title", ""))
+		}
+		ts := ThreadSummary{ID: id, Title: title, URL: full, ForumID: forumID, Author: clean(row.Find(".author, [data-author], .username, .thread-poster").First().Text()), Replies: findCount(text, `(?i)([0-9][0-9\s\x{00a0}.,]*)\s*svar`), Views: findCount(text, `(?i)([0-9][0-9\s\x{00a0}.,]*)\s*visningar`), LastPostAuthor: clean(row.Find(".last-post-author, [data-last-author]").First().Text()), Sticky: strings.Contains(strings.ToLower(row.AttrOr("class", "")), "sticky") || strings.Contains(strings.ToLower(text), "klistrad")}
+		if ts.LastPostAuthor == "" {
+			row.Find(".td_last_post a[href]").EachWithBreak(func(_ int, link *goquery.Selection) bool {
+				href, _ := link.Attr("href")
+				if ClassifyURL(href, sourceURL) == LinkThread {
+					ts.LastPostAuthor = clean(link.Text())
+					return false
+				}
+				return true
+			})
+		}
 		if t, ok := row.Find("time[datetime], time").First().Attr("datetime"); ok {
 			ts.LastPostAt = parseTime(t)
+		}
+		if ts.LastPostAt.IsZero() {
+			ts.LastPostAt = parseTime(findDateTime(text))
 		}
 		ts.PageCount = maxPage(row.Text())
 		result = append(result, ts)
@@ -111,14 +128,14 @@ func ParseThreadListing(html, sourceURL, forumID string) ([]ThreadSummary, error
 	// Flashback has used more than one forum-list presentation. These are
 	// thread-item containers, not a page-wide anchor scan; the URL classifier
 	// remains the second guard against authors, pagination and breadcrumbs.
-	rowSelector := ".threads .thread, ul.threads > li, table.threads tr.thread, " +
+	rowSelector := ".threads .thread, ul.threads > li, table.threads tr.thread, table#threadslist > tbody > tr, " +
 		".discussionListItems > li, .discussionListItem, .structItem, " +
 		".thread-list-item, .threadbit, tr.threadbit, .thread-row, " +
 		"li[data-content-class='thread'], tr[id^='thread_'], " +
 		"li[id^='thread_'], div[id^='thread_'], " +
 		"#threadlist > *, #threads > *"
 	doc.Find(rowSelector).Each(func(_ int, row *goquery.Selection) {
-		a := row.Find(".thread-title a[href], .structItem-title a[href], h3.title a[href], h2.title a[href], a.title[href]").FilterFunction(func(_ int, s *goquery.Selection) bool {
+		a := row.Find(".thread-title a[href], .structItem-title a[href], h3.title a[href], h2.title a[href], a.title[href], a[id^='thread_title_'], .td_title a[href]").FilterFunction(func(_ int, s *goquery.Selection) bool {
 			href, _ := s.Attr("href")
 			return ClassifyURL(href, sourceURL) == LinkThread
 		}).First()
@@ -169,12 +186,39 @@ func parseNumber(s string) int {
 	return n
 }
 func parseTime(s string) time.Time {
-	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04", "02.01.2006 15:04"} {
+	for _, layout := range []string{time.RFC3339, "2006-01-02, 15:04", "2006-01-02 15:04", "02.01.2006 15:04"} {
 		if t, err := time.Parse(layout, strings.Replace(s, "Z", "+00:00", 1)); err == nil {
 			return t
 		}
 	}
 	return time.Time{}
+}
+
+var postTimePattern = regexp.MustCompile(`\d{4}-\d{2}-\d{2}[, ]+\d{1,2}:\d{2}`)
+
+func postTimestamp(post *goquery.Selection) time.Time {
+	if value, ok := post.Find("time[datetime]").First().Attr("datetime"); ok {
+		if parsed := parseTime(value); !parsed.IsZero() {
+			return parsed
+		}
+	}
+	for _, selector := range []string{".post-date", ".post_time", ".date", ".time"} {
+		if text := clean(post.Find(selector).First().Text()); text != "" {
+			if parsed := parseTime(postTimePattern.FindString(text)); !parsed.IsZero() {
+				return parsed
+			}
+		}
+	}
+	if parsed := parseTime(postTimePattern.FindString(clean(post.Text()))); !parsed.IsZero() {
+		return parsed
+	}
+	return time.Time{}
+}
+
+var dateTimePattern = regexp.MustCompile(`\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}`)
+
+func findDateTime(s string) string {
+	return dateTimePattern.FindString(s)
 }
 func maxPage(s string) int {
 	max := 0
@@ -254,7 +298,12 @@ func ParseThreadPage(html, sourceURL, threadID string, page int) (ParsedPage, er
 	if err != nil {
 		return ParsedPage{}, err
 	}
-	pageData := ParsedPage{ThreadID: threadID, Page: page, MaxPage: page, SourceURL: sourceURL, Title: clean(doc.Find("h1").First().Text())}
+	title := clean(doc.Find("h1").First().Text())
+	if title == "" {
+		title = clean(doc.Find("title").First().Text())
+		title = strings.TrimSuffix(title, " - Flashback Forum")
+	}
+	pageData := ParsedPage{ThreadID: threadID, Page: page, MaxPage: page, SourceURL: sourceURL, Title: title}
 	doc.Find(".post").Each(func(i int, post *goquery.Selection) {
 		id := postIDFromAttr(post.AttrOr("id", ""))
 		if id == "" {
@@ -263,7 +312,7 @@ func ParseThreadPage(html, sourceURL, threadID string, page int) (ParsedPage, er
 		author := clean(post.Find(".post-user-username a, .post-user-username").First().Text())
 		msg := post.Find(".post_message").First()
 		raw := clean(msg.Text())
-		pageData.Posts = append(pageData.Posts, Post{ID: id, ThreadID: threadID, Author: author, Page: page, Position: i + 1, Text: raw, RawText: raw, SourceURL: sourceURL})
+		pageData.Posts = append(pageData.Posts, Post{ID: id, ThreadID: threadID, Author: author, Timestamp: postTimestamp(post), Page: page, Position: i + 1, Text: raw, RawText: raw, SourceURL: sourceURL})
 	})
 	doc.Find("a[href]").Each(func(_ int, a *goquery.Selection) {
 		h, _ := a.Attr("href")

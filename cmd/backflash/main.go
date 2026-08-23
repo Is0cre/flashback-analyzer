@@ -41,7 +41,7 @@ func main() {
 	appDone := diagnostics.Start("app construction")
 	model := tui.New(s, c)
 	appDone()
-	program := tea.NewProgram(model, tea.WithAltScreen())
+	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, runErr := program.Run()
 	if app, ok := finalModel.(tui.App); ok {
 		if shutdownErr := app.Shutdown(); shutdownErr != nil {

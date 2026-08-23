@@ -92,6 +92,25 @@ func TestParseThreadListingSupportsLegacyThreadRows(t *testing.T) {
 	}
 }
 
+func TestParseThreadListingSupportsFlashbackThreadsList(t *testing.T) {
+	rows, err := ParseThreadListing(fixture(t, "forum_listing_flashback_real.html"), BaseURL+"f246-retrospel-60622", "246")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("Flashback-listan gav %d rader, väntade 2: %#v", len(rows), rows)
+	}
+	if rows[0].Title != "Jag söker ett spel - RETRO-tråden" || rows[0].ID != "833642" || rows[0].Replies != 5546 || rows[0].Views != 554074 || !rows[0].Sticky {
+		t.Fatalf("första Flashback-tråden parsades fel: %#v", rows[0])
+	}
+	if rows[0].LastPostAuthor != "fearreaper" || rows[0].LastPostAt.IsZero() {
+		t.Fatalf("senaste inlägg parsades fel: %#v", rows[0])
+	}
+	if rows[1].Title != "Värderingstråden för retrospel, konsoler och tillbehör." {
+		t.Fatalf("andra trådens titel parsades fel: %#v", rows[1])
+	}
+}
+
 func TestParseThreadListingUsesScopedForumdisplayFallback(t *testing.T) {
 	rows, err := ParseThreadListing(fixture(t, "forum_listing_forumdisplay.html"), BaseURL+"f3-droger", "3")
 	if err != nil {
@@ -117,7 +136,7 @@ func TestParseThreadPage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Title != "Testtråd" || len(page.Posts) != 2 || page.Posts[0].Author != "Alice" || page.MaxPage != 7 {
+	if page.Title != "Testtråd" || len(page.Posts) != 2 || page.Posts[0].Author != "Alice" || page.Posts[0].Timestamp.IsZero() || page.Posts[0].Timestamp.Hour() != 10 || page.MaxPage != 7 {
 		t.Fatalf("unexpected page: %#v", page)
 	}
 }

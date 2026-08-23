@@ -7,8 +7,10 @@ import (
 )
 
 var (
-	forumPath  = regexp.MustCompile(`(?i)^/f([0-9]+)(-[^/]*)?$`)
-	threadPath = regexp.MustCompile(`(?i)^/t([0-9]+)(p[0-9]+)?n?(-[^/]*)?$`)
+	forumPath = regexp.MustCompile(`(?i)^/f([0-9]+)(-[^/]*)?$`)
+	// Flashback uses the same thread route for the normal title, page links,
+	// the thread status link (n) and the latest-post shortcut (s/lp).
+	threadPath = regexp.MustCompile(`(?i)^/t([0-9]+)(p[0-9]+|n|s|lp)?(-[^/]*)?$`)
 	postPath   = regexp.MustCompile(`(?i)^/p([0-9]+)$`)
 	userPath   = regexp.MustCompile(`(?i)^/u[0-9]+$`)
 )

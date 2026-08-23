@@ -836,12 +836,30 @@ func loadForumChildren(s *store.Store, c *flashback.Client, n flashback.ForumNod
 				return dataMsg{kind: "forums", forums: out, refresh: state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 24*time.Hour, refreshURL: n.URL}
 			}
 		}
-		out, e := c.Forum(context.Background(), n.URL)
-		if e == nil {
+		out, forumErr := c.Forum(context.Background(), n.URL)
+		if forumErr == nil && len(out) > 0 {
 			_ = s.SaveForums(out)
 			_ = s.SetExternalSyncState(external.SyncState{Source: navigationSource + ":" + n.ID, LastSyncedAt: time.Now(), Status: "ok"})
+			return dataMsg{kind: "forums", forums: out}
 		}
-		return dataMsg{kind: "forums", forums: out, err: e}
+
+		// A Flashback forum can advertise children in the navbar while the
+		// opened page contains only a thread listing (or a changed forum
+		// template). Never leave the user on a blank forum view: try the
+		// thread-list parser as the second semantic interpretation of the same
+		// page and persist what it finds.
+		threads, threadErr := c.Threads(context.Background(), n)
+		if threadErr == nil {
+			if err := s.SaveThreads(n.ID, threads); err != nil {
+				return dataMsg{kind: "threads", err: err}
+			}
+			_ = s.SetExternalSyncState(external.SyncState{Source: "flashback:threads:" + n.ID, LastSyncedAt: time.Now(), Status: "ok"})
+			return dataMsg{kind: "threads", threads: threads}
+		}
+		if forumErr != nil {
+			return dataMsg{kind: "forums", err: forumErr}
+		}
+		return dataMsg{kind: "forums", err: threadErr}
 	}
 }
 

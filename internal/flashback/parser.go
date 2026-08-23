@@ -60,7 +60,10 @@ func ParseNavigation(html, sourceURL string) ([]ForumNode, error) {
 				depth = 1
 			}
 		}
-		table.Find("td.td_forum > a[href]").Each(func(_ int, a *goquery.Selection) { add(a, parent, depth, a.Find("table.forumslist").Length() > 0) })
+		// Keep the forum-cell scope, but tolerate a wrapper around the anchor
+		// used by some forum templates. The surrounding cell is what excludes
+		// last-post authors and unrelated navigation links.
+		table.Find("td.td_forum a[href]").Each(func(_ int, a *goquery.Selection) { add(a, parent, depth, a.Find("table.forumslist").Length() > 0) })
 	})
 	return nodes, nil
 }

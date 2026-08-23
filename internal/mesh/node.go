@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // Node serves and retrieves public cache objects. A Transport implementation
@@ -13,6 +14,14 @@ import (
 type Node struct {
 	Store *ObjectStore
 	Peer  Transport
+	mu    sync.Mutex
+	busy  map[string]*getCall
+}
+
+type getCall struct {
+	done   chan struct{}
+	object CacheObject
+	err    error
 }
 
 func (n *Node) Serve(request Message) (Message, error) {
@@ -44,6 +53,32 @@ func (n *Node) GetContext(ctx context.Context, hash string) (CacheObject, error)
 	if o, err := n.Store.Get(hash); err == nil {
 		return o, nil
 	}
+	n.mu.Lock()
+	if n.busy == nil {
+		n.busy = make(map[string]*getCall)
+	}
+	if call := n.busy[hash]; call != nil {
+		n.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.object, call.err
+		case <-ctx.Done():
+			return CacheObject{}, ctx.Err()
+		}
+	}
+	call := &getCall{done: make(chan struct{})}
+	n.busy[hash] = call
+	n.mu.Unlock()
+	object, err := n.fetchContext(ctx, hash)
+	n.mu.Lock()
+	call.object, call.err = object, err
+	delete(n.busy, hash)
+	close(call.done)
+	n.mu.Unlock()
+	return object, err
+}
+
+func (n *Node) fetchContext(ctx context.Context, hash string) (CacheObject, error) {
 	if n.Peer == nil {
 		return CacheObject{}, errors.New("meshobjekt saknas lokalt och ingen peer är ansluten")
 	}

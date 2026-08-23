@@ -22,6 +22,7 @@ async def test_textual_reader_opens_navigates_quotes_and_persists_read_state(tmp
     app = FlashbackApp(db_path)
     async with app.run_test() as pilot:
         await pilot.pause()
+        assert "BACKFLASH" in str(app.query_one("#brand-strip").render())
         assert len(app.query_one("#thread-list").children) == 1
         await pilot.press("enter")
         await pilot.pause()

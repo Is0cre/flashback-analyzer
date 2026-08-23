@@ -10,6 +10,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static
 
 from .database import Database
+from .branding import render_empty_state, render_wordmark
 from .fetcher import Fetcher
 from .navigation_service import NavigationService
 from .parser import parse_thread_page
@@ -61,6 +62,8 @@ class RemoteSearchItem(ListItem):
 
 
 class FlashbackApp(App[None]):
+    TITLE = "BACKFLASH // DISCOURSE OPS"
+    SUB_TITLE = "local terminal console"
     CSS = """
     Screen { background: $surface; }
     #body { height: 1fr; }
@@ -68,6 +71,8 @@ class FlashbackApp(App[None]):
     #posts-panel { width: 2fr; border: solid $primary; }
     #detail-panel { width: 1fr; min-width: 34; border: solid $primary; padding: 1; overflow-y: auto; }
     .panel-title { height: 1; background: $primary; color: $text; padding: 0 1; }
+    #brand-strip { height: 1; color: $accent; text-style: bold; padding: 0 1; }
+    .empty-state { color: $text-muted; padding: 1; }
     ListView { height: 1fr; }
     #detail { height: 1fr; overflow-y: auto; }
     Footer { dock: bottom; }
@@ -107,6 +112,7 @@ class FlashbackApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
+        yield Static(render_wordmark(80), id="brand-strip", markup=False)
         with Horizontal(id="body"):
             with Vertical(id="threads-panel"):
                 yield Label("THREADS", id="left-title", classes="panel-title")
@@ -116,7 +122,7 @@ class FlashbackApp(App[None]):
                 yield ListView(id="post-list")
             with Vertical(id="detail-panel"):
                 yield Label("DETAIL", classes="panel-title")
-                yield Static("Select a thread to begin.", id="detail", markup=False)
+                yield Static(render_empty_state(40, 20), id="detail", markup=False, classes="empty-state")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -125,6 +131,10 @@ class FlashbackApp(App[None]):
         self._load_threads()
         if self.initial_thread is not None:
             self._open_thread(self.initial_thread)
+
+    def on_resize(self, event: object) -> None:
+        width = getattr(getattr(event, "size", None), "width", 80)
+        self.query_one("#brand-strip", Static).update(render_wordmark(int(width)))
 
     def on_unmount(self) -> None:
         if self.database is not None:
@@ -470,7 +480,7 @@ class FlashbackApp(App[None]):
             return
         if self.thread_id is not None:
             self.thread_id = None; self.posts = []; self.visible_posts = []
-            self.query_one("#post-list", ListView).clear(); self.query_one("#detail", Static).update("Select a thread to begin.")
+            self.query_one("#post-list", ListView).clear(); self.query_one("#detail", Static).update(render_empty_state(40, 20))
             if self.forum_mode:
                 self._load_forum_level()
             else:

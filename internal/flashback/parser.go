@@ -74,11 +74,24 @@ func ParseThreadListing(html, sourceURL, forumID string) ([]ThreadSummary, error
 	}
 	result := []ThreadSummary{}
 	seen := map[string]bool{}
-	doc.Find(".threads .thread, ul.threads > li, table.threads tr.thread").Each(func(_ int, row *goquery.Selection) {
-		a := row.Find("a[href]").FilterFunction(func(_ int, s *goquery.Selection) bool {
+	// Flashback has used more than one forum-list presentation. These are
+	// thread-item containers, not a page-wide anchor scan; the URL classifier
+	// remains the second guard against authors, pagination and breadcrumbs.
+	rowSelector := ".threads .thread, ul.threads > li, table.threads tr.thread, " +
+		".discussionListItems > li, .discussionListItem, .structItem, " +
+		".thread-list-item, .threadbit, tr.threadbit, .thread-row, " +
+		"li[data-content-class='thread']"
+	doc.Find(rowSelector).Each(func(_ int, row *goquery.Selection) {
+		a := row.Find(".thread-title a[href], .structItem-title a[href], h3.title a[href], h2.title a[href], a.title[href]").FilterFunction(func(_ int, s *goquery.Selection) bool {
 			href, _ := s.Attr("href")
 			return ClassifyURL(href, sourceURL) == LinkThread
 		}).First()
+		if a.Length() == 0 {
+			a = row.Find("a[href]").FilterFunction(func(_ int, s *goquery.Selection) bool {
+				href, _ := s.Attr("href")
+				return ClassifyURL(href, sourceURL) == LinkThread
+			}).First()
+		}
 		if a.Length() == 0 {
 			return
 		}

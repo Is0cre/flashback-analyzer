@@ -152,6 +152,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "threads":
 			a.Threads, a.CurrentView = m.threads, ViewThreads
+			if len(m.threads) == 0 {
+				a.Status = "INGA TRÅDAR · tryck r för att hämta igen"
+			}
 			if m.refresh {
 				target := m.refreshURL
 				if target == "" {
@@ -274,6 +277,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.Status = "POLISHÄNDELSER · HÄMTAR…"
 				return a, refreshEvents(a.EventService)
 			}
+			if a.CurrentView == ViewThreads && len(a.Stack) > 0 {
+				a.Status = "TRÅDAR · HÄMTAR…"
+				return a, refreshThreads(a.Store, a.Client, a.Stack[len(a.Stack)-1].URL, activeForum(a))
+			}
 		case "]":
 			if a.CurrentView == ViewRemoteSearch {
 				a.RemotePage++
@@ -334,9 +341,11 @@ func (a App) openSelected() (tea.Model, tea.Cmd) {
 			a.Stack = append(a.Stack, n)
 			a.Cursor = 0
 			if n.HasChildren {
+				a.Status = "FORUM · HÄMTAR UNDERFORUM…"
 				return a, loadForumChildren(a.Store, a.Client, n)
 			}
 			a.CurrentView = ViewThreads
+			a.Status = "TRÅDAR · HÄMTAR…"
 			return a, loadForum(a.Store, a.Client, n)
 		}
 	case ViewThreads:
@@ -403,6 +412,9 @@ func (a App) View() string {
 	if a.Input.Focused() {
 		b.WriteString("\n\n" + a.Input.View())
 	}
+	if a.Status != "" {
+		b.WriteString("\n\n" + muted.Render(a.Status))
+	}
 	b.WriteString("\n\n" + muted.Render("j/k flytta · Enter öppna · f forum · / fjärrsök · Ctrl+F lokalt · p polis · m mesh · g Gandr · h dashboard · q tillbaka/avsluta"))
 	return b.String()
 }
@@ -428,6 +440,9 @@ func renderNodes(xs []flashback.ForumNode, c int) string {
 	return b.String()
 }
 func renderThreads(xs []flashback.ThreadSummary, c int) string {
+	if len(xs) == 0 {
+		return muted.Render("Ingen trådlista finns lokalt ännu.")
+	}
 	var b strings.Builder
 	for i, n := range xs {
 		line := fmt.Sprintf("%s%s · %d svar", map[bool]string{true: "📌 ", false: ""}[n.Sticky], n.Title, n.Replies)

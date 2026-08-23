@@ -61,6 +61,16 @@ func TestParseThreadListingExtractsTitlesNotIDs(t *testing.T) {
 	}
 }
 
+func TestParseThreadListingSupportsStructItems(t *testing.T) {
+	rows, err := ParseThreadListing(fixture(t, "forum_listing_structitem.html"), BaseURL+"f3-droger", "3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].Title != "Tråd från ny forumlayout" || rows[1].ID != "2002" {
+		t.Fatalf("structItem-trådar parsades fel: %#v", rows)
+	}
+}
+
 func TestParseSearchResults(t *testing.T) {
 	rows, err := ParseSearchResults(fixture(t, "search_results.html"), BaseURL)
 	if err != nil {

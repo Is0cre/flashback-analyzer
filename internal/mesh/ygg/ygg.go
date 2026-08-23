@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/url"
 	"sync"
+	"time"
 
 	iwt "github.com/Arceliar/ironwood/types"
 	"github.com/backflash-cli/backflash/internal/mesh"
@@ -30,10 +31,18 @@ type Config struct {
 // Node owns only the public cache transport key. It must never be populated
 // with a Gandr identity key.
 type Node struct {
-	core      *core.Core
-	listeners []*core.Listener
-	peer      net.Addr
-	mu        sync.Mutex
+	core       *core.Core
+	listeners  []*core.Listener
+	peer       net.Addr
+	mu         sync.Mutex
+	readerOnce sync.Once
+	packets    chan packet
+	readErr    chan error
+}
+
+type packet struct {
+	from net.Addr
+	body []byte
 }
 
 func New(cfg Config) (*Node, error) {
@@ -118,6 +127,12 @@ func (n *Node) PeerCount() int {
 // A transport is serialized because the compact MVP protocol is request/
 // response and has no multiplexing identifier yet.
 func (n *Node) Request(request mesh.Message) (mesh.Message, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return n.RequestContext(ctx, request)
+}
+
+func (n *Node) RequestContext(ctx context.Context, request mesh.Message) (mesh.Message, error) {
 	if n == nil || n.core == nil || n.peer == nil {
 		return mesh.Message{}, errors.New("Yggdrasil-peer saknas")
 	}
@@ -130,24 +145,53 @@ func (n *Node) Request(request mesh.Message) (mesh.Message, error) {
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if _, err := n.core.WriteTo(b, n.peer); err != nil {
-		return mesh.Message{}, err
-	}
-	buf := make([]byte, mesh.MaxObjectSize+1<<20)
+	n.startReader()
 	for {
-		nread, from, err := n.core.ReadFrom(buf)
-		if err != nil {
+		if _, err := n.core.WriteTo(b, n.peer); err != nil {
 			return mesh.Message{}, err
 		}
-		if from.String() != n.peer.String() {
+		select {
+		case <-ctx.Done():
+			return mesh.Message{}, ctx.Err()
+		case err := <-n.readErr:
+			return mesh.Message{}, err
+		case received := <-n.packets:
+			if received.from.String() != n.peer.String() {
+				continue
+			}
+			var response mesh.Message
+			if err := json.Unmarshal(received.body, &response); err != nil {
+				return mesh.Message{}, err
+			}
+			return response, nil
+		case <-time.After(500 * time.Millisecond):
+			// A link can be up before the overlay route is ready. Retry the
+			// datagram without blocking the caller indefinitely.
 			continue
 		}
-		var response mesh.Message
-		if err := json.Unmarshal(buf[:nread], &response); err != nil {
-			return mesh.Message{}, err
-		}
-		return response, nil
 	}
+}
+
+func (n *Node) startReader() {
+	n.readerOnce.Do(func() {
+		n.packets = make(chan packet, 16)
+		n.readErr = make(chan error, 1)
+		go func() {
+			buf := make([]byte, mesh.MaxObjectSize+1<<20)
+			for {
+				nread, from, err := n.core.ReadFrom(buf)
+				if err != nil {
+					n.readErr <- err
+					return
+				}
+				body := append([]byte(nil), buf[:nread]...)
+				select {
+				case n.packets <- packet{from: from, body: body}:
+				default:
+				}
+			}
+		}()
+	})
 }
 
 func (n *Node) Close() error {

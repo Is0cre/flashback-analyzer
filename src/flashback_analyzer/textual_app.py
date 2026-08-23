@@ -6,7 +6,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Label, ListItem, ListView, Static
+from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static
 
 from .database import Database
 from .fetcher import Fetcher
@@ -67,6 +67,7 @@ class FlashbackApp(App[None]):
         Binding("J", "next_unread", "Next unread"), Binding("K", "previous_unread", "Previous unread"),
         Binding("g", "first", "First", show=False), Binding("G", "last", "Last", show=False),
         Binding("n", "toggle_unread", "Unread only"), Binding("enter", "detail", "Open"),
+        Binding("/", "search", "Search"),
         Binding("f", "forums", "Forums"), Binding("t", "tracked", "Tracked"),
         Binding("b", "up", "Up"), Binding("r", "refresh", "Refresh"),
         Binding("q", "back", "Back / quit"), Binding("?", "help", "Help"),
@@ -84,6 +85,7 @@ class FlashbackApp(App[None]):
         self.navigation: NavigationService | None = None
         self.forum_mode = False
         self.forum_stack: list[int] = []
+        self.search_active = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -305,6 +307,25 @@ class FlashbackApp(App[None]):
         if self.thread_id is not None:
             self.unread_only = not self.unread_only; self._render_posts()
 
+    def action_search(self) -> None:
+        self.push_screen(SearchScreen(), self.action_search_results)
+
+    def action_search_results(self, query: str | None) -> None:
+        if self.database is None or not query:
+            return
+        results = self.database.search_posts(query, thread_id=self.thread_id)
+        self.search_active = True
+        self.visible_posts = results
+        view = self.query_one("#post-list", ListView)
+        view.clear()
+        for row in results:
+            view.append(PostItem(int(row["post_id"]), str(row["username"]), row["posted_at"], str(row["text"]), False))
+        if results:
+            view.index = 0
+            self._show_post(results[0])
+        else:
+            self.query_one("#detail", Static).update(f"No cached posts matched: {query}")
+
     def action_forums(self) -> None:
         self.thread_id = None
         self._load_forum_level()
@@ -338,6 +359,11 @@ class FlashbackApp(App[None]):
             self._mark_seen(row); self._load_threads()
 
     def action_back(self) -> None:
+        if self.search_active:
+            self.search_active = False
+            self.unread_only = False
+            self._render_posts()
+            return
         if self.thread_id is not None:
             self.thread_id = None; self.posts = []; self.visible_posts = []
             self.query_one("#post-list", ListView).clear(); self.query_one("#detail", Static).update("Select a thread to begin.")
@@ -380,6 +406,31 @@ class HelpScreen(Screen[None]):
     def on_key(self, event: object) -> None:
         if getattr(event, "key", None) in {"q", "escape"}:
             self.app.pop_screen()
+
+
+class SearchScreen(Screen[str | None]):
+    """Small local-search prompt; it never contacts Flashback."""
+
+    CSS = """
+    SearchScreen { align: center middle; }
+    #search-box { width: 70; height: auto; border: solid $primary; padding: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="search-box"):
+            yield Label("SEARCH CACHED POSTS")
+            yield Input(placeholder="text or username", id="search-input")
+            yield Label("Enter search · Escape cancel", classes="panel-title")
+
+    def on_mount(self) -> None:
+        self.query_one("#search-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value)
+
+    def on_key(self, event: object) -> None:
+        if getattr(event, "key", None) in {"escape", "q"}:
+            self.dismiss(None)
 
 
 def launch_textual_tui(db_path: Path, initial_thread: int | None = None) -> None:

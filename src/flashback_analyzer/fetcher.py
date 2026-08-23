@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 
 from .urls import thread_page_url
+from .session import AnonymousSessionProvider, SessionProvider
 
 
 class Fetcher:
@@ -18,19 +19,24 @@ class Fetcher:
         min_delay_seconds: float = 5.2,
         timeout_seconds: float = 30.0,
         user_agent: str = "flashback-analyzer/0.1 (+read-only research tool)",
+        session_provider: SessionProvider | None = None,
     ) -> None:
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.min_delay_seconds = min_delay_seconds
+        self.session_provider = session_provider or AnonymousSessionProvider()
         self._last_request_at = 0.0
+        headers = {
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "sv-SE,sv;q=0.9,en;q=0.7",
+        }
+        headers.update(self.session_provider.headers())
         self.client = httpx.Client(
             timeout=timeout_seconds,
             follow_redirects=True,
-            headers={
-                "User-Agent": user_agent,
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "sv-SE,sv;q=0.9,en;q=0.7",
-            },
+            headers=headers,
+            cookies=dict(self.session_provider.cookies()),
         )
 
     def close(self) -> None:

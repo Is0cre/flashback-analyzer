@@ -8,7 +8,7 @@ from .models import ParsedPage
 from .navigation import ForumNode, ThreadSummary
 from .urls import normalize_url, thread_page_url, url_domain
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS posts (
 CREATE INDEX IF NOT EXISTS idx_posts_thread ON posts(thread_id);
 CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id);
 CREATE INDEX IF NOT EXISTS idx_posts_posted_at ON posts(posted_at);
+CREATE VIRTUAL TABLE IF NOT EXISTS post_search USING fts5(
+    post_id UNINDEXED, thread_id UNINDEXED, username, text
+);
 CREATE TABLE IF NOT EXISTS raw_pages (
     thread_id INTEGER NOT NULL REFERENCES threads(thread_id) ON DELETE CASCADE, page INTEGER NOT NULL,
     source_url TEXT NOT NULL, content_hash TEXT NOT NULL, raw_html TEXT NOT NULL,
@@ -208,6 +211,9 @@ class Database:
             self.conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
         self.conn.commit()
         self.conn.execute("INSERT OR IGNORE INTO tracked_threads(thread_id) SELECT thread_id FROM threads")
+        self.conn.execute("""INSERT INTO post_search(post_id, thread_id, username, text)
+            SELECT p.post_id, p.thread_id, u.username, p.text FROM posts p JOIN users u ON u.user_id=p.user_id
+            WHERE NOT EXISTS (SELECT 1 FROM post_search s WHERE s.post_id=CAST(p.post_id AS TEXT))""")
         self.conn.commit()
 
     def close(self) -> None:
@@ -243,6 +249,9 @@ class Database:
                 posted_at=excluded.posted_at, text=excluded.text, raw_text=excluded.raw_text, source_url=excluded.source_url,
                 content_hash=excluded.content_hash""", (post.post_id, post.thread_id, post.page, position, post.ordinal, user_id, posted_at, post.text, post.raw_text, source_url, hashlib.sha256(post.raw_text.encode()).hexdigest()))
             cur.execute("DELETE FROM links WHERE post_id=?", (post.post_id,))
+            cur.execute("DELETE FROM post_search WHERE post_id=?", (str(post.post_id),))
+            cur.execute("INSERT INTO post_search(post_id, thread_id, username, text) VALUES (?, ?, ?, ?)",
+                        (post.post_id, post.thread_id, post.author, post.text))
             cur.executemany("INSERT OR IGNORE INTO links(post_id, url, domain, author, posted_at) VALUES (?, ?, ?, ?, ?)", [(post.post_id, normalize_url(url), url_domain(url), post.author, posted_at) for url in post.links])
         # Resolve after all posts on this page exist, including forward references.
         for post in parsed.posts:
@@ -317,6 +326,26 @@ class Database:
         return self.conn.execute("""SELECT p.post_id, p.ordinal, p.page, p.position_on_page, p.posted_at,
             p.text, p.raw_text, u.username FROM posts p JOIN users u ON u.user_id=p.user_id
             WHERE p.thread_id=? ORDER BY COALESCE(p.posted_at, ''), COALESCE(p.ordinal, p.post_id), p.post_id""", (thread_id,)).fetchall()
+
+    def search_posts(self, query: str, thread_id: int | None = None, limit: int = 200) -> list[sqlite3.Row]:
+        """Search cached original post text and usernames using SQLite FTS5."""
+
+        query = " ".join(query.split()).strip()
+        if not query:
+            return []
+        match = " OR ".join(f'"{term.replace(chr(34), "")}"' for term in query.split())
+        params: list[object] = [match]
+        thread_clause = ""
+        if thread_id is not None:
+            thread_clause = " AND s.thread_id=?"
+            params.append(thread_id)
+        params.append(limit)
+        return self.conn.execute(f"""SELECT DISTINCT p.post_id, p.ordinal, p.page, p.position_on_page, p.posted_at,
+            p.text, p.raw_text, u.username FROM post_search s
+            JOIN posts p ON p.post_id=CAST(s.post_id AS INTEGER)
+            JOIN users u ON u.user_id=p.user_id
+            WHERE post_search MATCH ?{thread_clause}
+            ORDER BY COALESCE(p.posted_at, ''), COALESCE(p.ordinal, p.post_id), p.post_id LIMIT ?""", params).fetchall()
 
     def post_quotes(self, post_id: int) -> list[sqlite3.Row]:
         return self.conn.execute("""SELECT quoted_post_id, quoted_author, quote_text FROM quotes

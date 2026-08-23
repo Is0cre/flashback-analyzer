@@ -15,8 +15,12 @@ Read-only grund för att samla in och analysera Flashback-trådar utan att bland
 - delar trådar deterministiskt i kronologiska analyssegment
 - visar deltagarstatistik, topplista, Top-10-andel, Gini och HHI
 - har tomma men färdiga tabeller för kommande stance/opinionsanalys
+- söker lokalt i sparade inlägg med SQLite FTS5
 
 Verktyget är medvetet read-only. Det postar ingenting till Flashback.
+En explicit session-provider-gräns finns för framtida legitima inloggade
+funktioner; klienten läser eller skapar inte lösenord och försöker inte kringgå
+inloggning, CAPTCHA eller ålderskontroll.
 
 ## Installation
 
@@ -144,6 +148,9 @@ Tryck `f` i Textual-läsaren för att bläddra i Flashbacks cacheade forumträd.
 `Enter` öppnar kategori/forum, `b` går upp, `t` återgår till sparade trådar och
 `r` uppdaterar den aktuella nivån. Forumträdet cacheas i SQLite och visas
 offline; en ny tråd hämtas först när den väljs.
+
+I en öppnad tråd trycker du `/` för att söka i lokalt cacheade inlägg och
+användarnamn. Sökningen gör inga fjärranrop.
 
 Live-listan visar visningar, läsare och svar innan hämtning. TUI:t hämtar en
 sida som standard, visar en grov siduppskattning och kräver extra bekräftelse

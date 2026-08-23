@@ -19,7 +19,7 @@ def test_segments_are_rebuilt_idempotently_with_membership(tmp_path):
         assert second == first
         assert db.conn.execute("SELECT COUNT(*) FROM segments WHERE thread_id=999").fetchone()[0] == 2
         assert db.conn.execute("SELECT COUNT(*) FROM segment_posts").fetchone()[0] == 2
-        assert db.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
+        assert db.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 10
 
 
 def test_invalid_segment_size_is_rejected(tmp_path):

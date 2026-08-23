@@ -88,3 +88,21 @@ async def test_textual_renders_flashback_bbcode_as_literal_text(tmp_path):
         await pilot.pause()
         assert app.thread_id == 1000
         assert "[/MOD]" in str(app.query_one("#detail").render())
+
+
+@pytest.mark.asyncio
+async def test_textual_searches_cached_posts(tmp_path):
+    db_path = tmp_path / "search.sqlite3"
+    with Database(db_path) as db:
+        db.store_page(parse_thread_page(FIXTURE.read_text(), thread_id=1001, page=1))
+
+    app = FlashbackApp(db_path)
+    async with app.run_test() as pilot:
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("/")
+        await pilot.press("t", "r", "o", "r")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.search_active is True
+        assert [row["post_id"] for row in app.visible_posts] == [1001]

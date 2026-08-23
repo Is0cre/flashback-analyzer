@@ -83,7 +83,9 @@ func ParseThreadListing(html, sourceURL, forumID string) ([]ThreadSummary, error
 	rowSelector := ".threads .thread, ul.threads > li, table.threads tr.thread, " +
 		".discussionListItems > li, .discussionListItem, .structItem, " +
 		".thread-list-item, .threadbit, tr.threadbit, .thread-row, " +
-		"li[data-content-class='thread']"
+		"li[data-content-class='thread'], tr[id^='thread_'], " +
+		"li[id^='thread_'], div[id^='thread_'], " +
+		"#threadlist > *, #threads > *"
 	doc.Find(rowSelector).Each(func(_ int, row *goquery.Selection) {
 		a := row.Find(".thread-title a[href], .structItem-title a[href], h3.title a[href], h2.title a[href], a.title[href]").FilterFunction(func(_ int, s *goquery.Selection) bool {
 			href, _ := s.Attr("href")

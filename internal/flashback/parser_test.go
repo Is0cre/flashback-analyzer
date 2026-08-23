@@ -71,6 +71,16 @@ func TestParseThreadListingSupportsStructItems(t *testing.T) {
 	}
 }
 
+func TestParseThreadListingSupportsLegacyThreadRows(t *testing.T) {
+	rows, err := ParseThreadListing(fixture(t, "forum_listing_thread_rows.html"), BaseURL+"f3-droger", "3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].ID != "3001" || rows[1].Title != "Första sidan: vanlig tråd" {
+		t.Fatalf("äldre thread-rader parsades fel: %#v", rows)
+	}
+}
+
 func TestParseSearchResults(t *testing.T) {
 	rows, err := ParseSearchResults(fixture(t, "search_results.html"), BaseURL)
 	if err != nil {

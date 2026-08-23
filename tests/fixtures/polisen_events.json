@@ -1,0 +1,20 @@
+[
+  {
+    "id": 123456,
+    "datetime": "2026-08-23 12:34:56 +0200",
+    "name": "Trafikolycka",
+    "summary": "En trafikolycka har inträffat.",
+    "url": "/aktuellt/handelser/2026/augusti/23/123456/",
+    "type": "Trafikolycka",
+    "location": {"name": "Uppsala", "gps": "59.8586,17.6389"}
+  },
+  {
+    "id": 123457,
+    "datetime": "2026-08-23T13:00:00+02:00",
+    "name": "Övrigt",
+    "summary": "Ingen koordinat i meddelandet.",
+    "url": "https://polisen.se/aktuellt/123457",
+    "type": "Övrigt",
+    "location": {"name": "Örebro", "gps": "inte-gps"}
+  }
+]

@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
+	"github.com/backflash-cli/backflash/internal/external"
+	"github.com/backflash-cli/backflash/internal/external/polisen"
 	"github.com/backflash-cli/backflash/internal/flashback"
+	"github.com/backflash-cli/backflash/internal/service"
 	"github.com/backflash-cli/backflash/internal/store"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -25,6 +29,7 @@ const (
 	ViewThreads
 	ViewReader
 	ViewRemoteSearch
+	ViewExternalEvents
 )
 
 type dataMsg struct {
@@ -33,6 +38,9 @@ type dataMsg struct {
 	threads []flashback.ThreadSummary
 	posts   []flashback.Post
 	results []flashback.SearchResult
+	events  []external.ExternalEvent
+	detail  *external.ExternalEvent
+	refresh bool
 	err     error
 }
 type App struct {
@@ -52,6 +60,9 @@ type App struct {
 	SearchRemote bool
 	Query        string
 	RemotePage   int
+	Events       []external.ExternalEvent
+	EventDetail  *external.ExternalEvent
+	EventService *service.ExternalEventsService
 }
 
 var (
@@ -65,7 +76,9 @@ func New(s *store.Store, c *flashback.Client) App {
 	input := textinput.New()
 	input.Prompt = "> "
 	input.CharLimit = 200
-	return App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1}
+	eventClient := polisen.NewClient(nil, nil)
+	eventService := &service.ExternalEventsService{Store: s, Provider: eventClient, RefreshAfter: 2 * time.Minute, Now: time.Now}
+	return App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1, EventService: eventService}
 }
 
 func Splash(w io.Writer, width int) {
@@ -85,7 +98,7 @@ func Splash(w io.Writer, width int) {
 	_, _ = w.Write(append(b, []byte("\x1b[0m\n")...))
 }
 
-func (a App) Init() tea.Cmd { return nil }
+func (a App) Init() tea.Cmd { return loadCachedEvents(a.EventService) }
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -105,6 +118,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.Posts, a.CurrentView = m.posts, ViewReader
 		case "search":
 			a.Results, a.CurrentView = m.results, ViewRemoteSearch
+		case "events":
+			a.Events = m.events
+			if a.CurrentView == ViewExternalEvents {
+				a.EventDetail = m.detail
+			}
+			if m.refresh {
+				return a, refreshEvents(a.EventService)
+			}
 		}
 	case tea.KeyMsg:
 		if a.Input.Focused() {
@@ -137,6 +158,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "t":
 			a.CurrentView, a.Status = ViewOverview, "SPARADE TRÅDAR · lokal data"
 			return a, nil
+		case "p":
+			a.CurrentView, a.Cursor, a.EventDetail = ViewExternalEvents, 0, nil
+			return a, loadCachedEvents(a.EventService)
 		case "b":
 			if len(a.Stack) > 0 {
 				a.Stack = a.Stack[:len(a.Stack)-1]
@@ -159,7 +183,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.Input.Focus()
 			return a, nil
 		case "enter":
+			if a.CurrentView == ViewExternalEvents && a.Cursor < len(a.Events) {
+				a.EventDetail = &a.Events[a.Cursor]
+				return a, nil
+			}
 			return a.openSelected()
+		case "r":
+			if a.CurrentView == ViewExternalEvents {
+				a.Status = "POLISHÄNDELSER · HÄMTAR…"
+				return a, refreshEvents(a.EventService)
+			}
 		case "]":
 			if a.CurrentView == ViewRemoteSearch {
 				a.RemotePage++
@@ -194,6 +227,8 @@ func (a App) itemCount() int {
 		return len(a.Posts)
 	case ViewRemoteSearch:
 		return len(a.Results)
+	case ViewExternalEvents:
+		return len(a.Events)
 	}
 	return 0
 }
@@ -229,6 +264,10 @@ func (a App) openSelected() (tea.Model, tea.Cmd) {
 			a.Status = "TRÅD HÄMTAS…"
 			return a, loadRemoteThread(a.Store, a.Client, r)
 		}
+	case ViewExternalEvents:
+		if a.Cursor < len(a.Events) {
+			a.EventDetail = &a.Events[a.Cursor]
+		}
 	}
 	return a, nil
 }
@@ -240,7 +279,14 @@ func (a App) View() string {
 	switch a.CurrentView {
 	case ViewOverview:
 		b.WriteString(titleStyle.Render("ÖVERSIKT"))
-		b.WriteString("\n\nSTATUS\n  DB          REDO\n  NÄTVERK     " + a.Status + "\n  SESSION     " + map[bool]string{true: "AKTIV", false: "ANONYM"}[a.Client.Session.Authenticated()] + "\n\nSkriv f för forum, / för fjärrsökning eller Ctrl+F för lokal sökning.")
+		b.WriteString("\n\nSTATUS\n  DB          REDO\n  NÄTVERK     " + a.Status + "\n  SESSION     " + map[bool]string{true: "AKTIV", false: "ANONYM"}[a.Client.Session.Authenticated()])
+		b.WriteString("\n\nPOLISHÄNDELSER\n")
+		if len(a.Events) == 0 {
+			b.WriteString("Inga sparade polishändelser.\n")
+		} else {
+			b.WriteString(renderEventSummary(a.Events))
+		}
+		b.WriteString("\nSkriv p för alla polishändelser, f för forum, / för fjärrsökning eller Ctrl+F för lokal sökning.")
 	case ViewForums:
 		b.WriteString(titleStyle.Render("FORUM · " + a.breadcrumb()))
 		b.WriteString("\n\n")
@@ -257,6 +303,13 @@ func (a App) View() string {
 		b.WriteString(titleStyle.Render("SÖK PÅ FLASHBACK: " + a.Query))
 		b.WriteString("\n\n")
 		b.WriteString(renderResults(a.Results, a.Cursor))
+	case ViewExternalEvents:
+		b.WriteString(titleStyle.Render("POLISHÄNDELSER"))
+		b.WriteString("\n\n")
+		b.WriteString(renderEvents(a.Events, a.Cursor))
+		if a.EventDetail != nil {
+			b.WriteString("\n\n" + renderEventDetail(*a.EventDetail))
+		}
 	}
 	if a.Input.Focused() {
 		b.WriteString("\n\n" + a.Input.View())
@@ -315,6 +368,42 @@ func renderResults(xs []flashback.SearchResult, c int) string {
 			line = selected.Render(line)
 		}
 		b.WriteString(line + "\n")
+	}
+	return b.String()
+}
+
+func renderEvents(xs []external.ExternalEvent, c int) string {
+	var b strings.Builder
+	for i, e := range xs {
+		line := fmt.Sprintf("%s · %s · %s", e.Timestamp.Local().Format("02 jan 15:04"), e.EventType, e.LocationName)
+		if e.Title != "" {
+			line += " · " + e.Title
+		}
+		if i == c {
+			line = selected.Render(line)
+		}
+		b.WriteString(line + "\n")
+	}
+	if len(xs) == 0 {
+		return "Inga sparade polishändelser."
+	}
+	return b.String()
+}
+func renderEventSummary(xs []external.ExternalEvent) string {
+	if len(xs) > 3 {
+		xs = xs[:3]
+	}
+	return renderEvents(xs, -1)
+}
+func renderEventDetail(e external.ExternalEvent) string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(e.Title) + "\n\n")
+	b.WriteString("TID        " + e.Timestamp.Local().Format("2006-01-02 15:04") + "\n")
+	b.WriteString("TYP        " + e.EventType + "\n")
+	b.WriteString("PLATS      " + e.LocationName + "\n\n")
+	b.WriteString(e.Summary)
+	if e.URL != "" {
+		b.WriteString("\n\nKÄLLA      " + e.URL)
 	}
 	return b.String()
 }
@@ -466,5 +555,27 @@ func localSearch(s *store.Store, q, id string) tea.Cmd {
 			}
 		}
 		return dataMsg{kind: "search", results: r}
+	}
+}
+
+func loadCachedEvents(events *service.ExternalEventsService) tea.Cmd {
+	return func() tea.Msg {
+		if events == nil {
+			return dataMsg{kind: "events"}
+		}
+		cached, err := events.Cached(polisen.Source, 100)
+		if err != nil {
+			return dataMsg{kind: "events", err: err}
+		}
+		return dataMsg{kind: "events", events: cached, refresh: events.Stale(polisen.Source)}
+	}
+}
+func refreshEvents(events *service.ExternalEventsService) tea.Cmd {
+	return func() tea.Msg {
+		if events == nil {
+			return dataMsg{kind: "events"}
+		}
+		found, err := events.Refresh(context.Background())
+		return dataMsg{kind: "events", events: found, refresh: false, err: err}
 	}
 }

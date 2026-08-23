@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, 
 CREATE TABLE IF NOT EXISTS quotes (post_id TEXT NOT NULL, quoted_post_id TEXT, author TEXT, text TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS links (post_id TEXT NOT NULL, url TEXT NOT NULL, domain TEXT NOT NULL DEFAULT '', PRIMARY KEY(post_id, url));
 CREATE TABLE IF NOT EXISTS reader_state (thread_id TEXT PRIMARY KEY, last_seen_post_id TEXT, last_seen_at TEXT);
+CREATE TABLE IF NOT EXISTS external_events (source TEXT NOT NULL, external_id TEXT NOT NULL, event_time TEXT, title TEXT NOT NULL, summary TEXT, event_type TEXT, location_name TEXT, latitude REAL, longitude REAL, url TEXT, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY(source, external_id));
+CREATE TABLE IF NOT EXISTS external_sync_state (source TEXT PRIMARY KEY, last_synced_at TEXT, status TEXT NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS post_search USING fts5(post_id UNINDEXED, thread_id UNINDEXED, author, text);`)
 	return err
 }

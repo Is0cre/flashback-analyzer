@@ -1,5 +1,7 @@
 package mesh
 
+import "context"
+
 type MessageType string
 
 const (
@@ -19,8 +21,14 @@ type Transport interface {
 	Close() error
 }
 
+type ContextTransport interface {
+	Transport
+	RequestContext(context.Context, Message) (Message, error)
+}
+
 type Message struct {
 	Type MessageType `json:"type"`
+	ID   string      `json:"id,omitempty"`
 	Hash string      `json:"hash,omitempty"`
 	Body []byte      `json:"body,omitempty"`
 }

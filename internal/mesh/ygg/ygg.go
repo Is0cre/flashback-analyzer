@@ -6,6 +6,7 @@ package ygg
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"net"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	iwt "github.com/Arceliar/ironwood/types"
@@ -35,14 +37,23 @@ type Node struct {
 	listeners  []*core.Listener
 	peer       net.Addr
 	mu         sync.Mutex
+	requestMu  sync.Mutex
 	readerOnce sync.Once
-	packets    chan packet
+	pending    map[string]chan mesh.Message
 	readErr    chan error
+	handler    *mesh.Node
+	bytesSent  atomic.Uint64
+	bytesRecv  atomic.Uint64
+	served     atomic.Uint64
+	received   atomic.Uint64
+	lastOK     atomic.Int64
+	lastFailed atomic.Int64
 }
 
-type packet struct {
-	from net.Addr
-	body []byte
+type Stats struct {
+	BytesSent, BytesReceived       uint64
+	ObjectsServed, ObjectsReceived uint64
+	LastSuccess, LastFailure       time.Time
 }
 
 func New(cfg Config) (*Node, error) {
@@ -143,26 +154,35 @@ func (n *Node) RequestContext(ctx context.Context, request mesh.Message) (mesh.M
 	if len(b) > mesh.MaxObjectSize+1<<20 {
 		return mesh.Message{}, errors.New("meshförfrågan är för stor")
 	}
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.startReader()
-	for {
-		if _, err := n.core.WriteTo(b, n.peer); err != nil {
+	if request.ID == "" {
+		request.ID = requestID()
+		b, err = json.Marshal(request)
+		if err != nil {
 			return mesh.Message{}, err
 		}
+	}
+	n.requestMu.Lock()
+	defer n.requestMu.Unlock()
+	n.startLoop(nil)
+	responseCh := make(chan mesh.Message, 1)
+	n.pending[request.ID] = responseCh
+	defer delete(n.pending, request.ID)
+	for {
+		if _, err := n.core.WriteTo(b, n.peer); err != nil {
+			n.lastFailed.Store(time.Now().UnixNano())
+			return mesh.Message{}, err
+		}
+		n.bytesSent.Add(uint64(len(b)))
 		select {
 		case <-ctx.Done():
 			return mesh.Message{}, ctx.Err()
 		case err := <-n.readErr:
 			return mesh.Message{}, err
-		case received := <-n.packets:
-			if received.from.String() != n.peer.String() {
-				continue
+		case response := <-responseCh:
+			if response.Type == mesh.Object {
+				n.received.Add(1)
 			}
-			var response mesh.Message
-			if err := json.Unmarshal(received.body, &response); err != nil {
-				return mesh.Message{}, err
-			}
+			n.lastOK.Store(time.Now().UnixNano())
 			return response, nil
 		case <-time.After(500 * time.Millisecond):
 			// A link can be up before the overlay route is ready. Retry the
@@ -172,26 +192,77 @@ func (n *Node) RequestContext(ctx context.Context, request mesh.Message) (mesh.M
 	}
 }
 
-func (n *Node) startReader() {
+func requestID() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
+func (n *Node) startLoop(handler *mesh.Node) {
 	n.readerOnce.Do(func() {
-		n.packets = make(chan packet, 16)
+		n.pending = make(map[string]chan mesh.Message)
 		n.readErr = make(chan error, 1)
+		n.handler = handler
 		go func() {
 			buf := make([]byte, mesh.MaxObjectSize+1<<20)
 			for {
 				nread, from, err := n.core.ReadFrom(buf)
 				if err != nil {
+					n.lastFailed.Store(time.Now().UnixNano())
 					n.readErr <- err
 					return
 				}
-				body := append([]byte(nil), buf[:nread]...)
-				select {
-				case n.packets <- packet{from: from, body: body}:
-				default:
+				n.bytesRecv.Add(uint64(nread))
+				var request mesh.Message
+				if err := json.Unmarshal(buf[:nread], &request); err != nil {
+					continue
+				}
+				if request.Type == mesh.Get && n.handler != nil {
+					response, err := n.handler.Serve(request)
+					response.ID = request.ID
+					if err != nil {
+						response = mesh.Message{Type: mesh.NotFound, Hash: request.Hash, ID: request.ID}
+					}
+					body, err := json.Marshal(response)
+					if err == nil {
+						if _, writeErr := n.core.WriteTo(body, from); writeErr == nil {
+							n.bytesSent.Add(uint64(len(body)))
+							if response.Type == mesh.Object {
+								n.served.Add(1)
+							}
+							n.lastOK.Store(time.Now().UnixNano())
+						}
+					}
+					continue
+				}
+				if request.ID == "" {
+					continue
+				}
+				n.mu.Lock()
+				responseCh := n.pending[request.ID]
+				n.mu.Unlock()
+				if responseCh != nil {
+					select {
+					case responseCh <- request:
+					default:
+					}
 				}
 			}
 		}()
 	})
+}
+
+func (n *Node) Stats() Stats {
+	stats := Stats{BytesSent: n.bytesSent.Load(), BytesReceived: n.bytesRecv.Load(), ObjectsServed: n.served.Load(), ObjectsReceived: n.received.Load()}
+	if value := n.lastOK.Load(); value != 0 {
+		stats.LastSuccess = time.Unix(0, value)
+	}
+	if value := n.lastFailed.Load(); value != 0 {
+		stats.LastFailure = time.Unix(0, value)
+	}
+	return stats
 }
 
 func (n *Node) Close() error {
@@ -202,35 +273,26 @@ func (n *Node) Close() error {
 	return nil
 }
 
+// Prepare installs the public cache handler before the runtime becomes
+// visible to callers. This avoids a startup race between the first GET and
+// the serving loop; it does not start any network activity by itself.
+func (n *Node) Prepare(cache *mesh.Node) {
+	if n != nil && n.core != nil {
+		n.startLoop(cache)
+	}
+}
+
 // Serve reads public cache requests until the transport closes. It is meant
 // for an opt-in cache node and performs no peer/user identity logging.
 func (n *Node) Serve(ctx context.Context, cache *mesh.Node) error {
 	if n == nil || n.core == nil || cache == nil {
 		return errors.New("Yggdrasil-cache-node saknar state")
 	}
-	buf := make([]byte, mesh.MaxObjectSize+1<<20)
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		nread, from, err := n.core.ReadFrom(buf)
-		if err != nil {
-			return err
-		}
-		var request mesh.Message
-		if err := json.Unmarshal(buf[:nread], &request); err != nil {
-			continue
-		}
-		response, err := cache.Serve(request)
-		if err != nil {
-			response = mesh.Message{Type: mesh.NotFound, Hash: request.Hash}
-		}
-		body, err := json.Marshal(response)
-		if err != nil {
-			continue
-		}
-		_, _ = n.core.WriteTo(body, from)
+	n.startLoop(cache)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-n.readErr:
+		return err
 	}
 }

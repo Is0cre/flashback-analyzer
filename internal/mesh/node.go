@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,10 @@ func (n *Node) Serve(request Message) (Message, error) {
 }
 
 func (n *Node) Get(hash string) (CacheObject, error) {
+	return n.GetContext(context.Background(), hash)
+}
+
+func (n *Node) GetContext(ctx context.Context, hash string) (CacheObject, error) {
 	if n == nil || n.Store == nil {
 		return CacheObject{}, errors.New("mesh-lagring saknas")
 	}
@@ -42,7 +47,14 @@ func (n *Node) Get(hash string) (CacheObject, error) {
 	if n.Peer == nil {
 		return CacheObject{}, errors.New("meshobjekt saknas lokalt och ingen peer är ansluten")
 	}
-	response, err := n.Peer.Request(Message{Type: Get, Hash: hash})
+	var response Message
+	var err error
+	request := Message{Type: Get, Hash: hash}
+	if transport, ok := n.Peer.(ContextTransport); ok {
+		response, err = transport.RequestContext(ctx, request)
+	} else {
+		response, err = n.Peer.Request(request)
+	}
 	if err != nil {
 		return CacheObject{}, err
 	}

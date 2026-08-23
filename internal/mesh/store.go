@@ -81,3 +81,17 @@ func (s *ObjectStore) Get(hash string) (CacheObject, error) {
 	}
 	return o, nil
 }
+
+func (s *ObjectStore) Count() (int, error) {
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".json" {
+			count++
+		}
+	}
+	return count, nil
+}

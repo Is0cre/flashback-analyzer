@@ -179,7 +179,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.Dashboard = m.snapshot
 	case meshMsg:
 		a.MeshState = m.snapshot
-		a.Dashboard.Mesh = meshStateLabel(m.snapshot.State)
+		a.applyMeshSnapshot(m.snapshot)
 		if m.err != nil {
 			a.Status = "MESH · FEL"
 		}
@@ -192,7 +192,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.MeshState = a.MeshRuntime.Snapshot()
-		a.Dashboard.Mesh = meshStateLabel(a.MeshState.State)
+		a.applyMeshSnapshot(a.MeshState)
 		return a, meshTick()
 	case tea.KeyMsg:
 		if a.Input.Focused() {
@@ -516,7 +516,9 @@ func renderDashboard(a App) string {
 		b.WriteString("────────────────────────────       ────────────────────────────       ───────────────\n")
 		b.WriteString(renderHot(d.HotThreads))
 		b.WriteString(fmt.Sprintf("                                   Yggdrasil    %s                 ᚷ %s\n", d.Mesh, d.Gandr))
-		b.WriteString("                                   Lokala objekt —                 privat läge\n")
+		b.WriteString(fmt.Sprintf("                                   Peers        %d                 privat läge\n", d.MeshPeers))
+		b.WriteString(fmt.Sprintf("                                   Delning      %s                 objekt %d\n", d.MeshSharing, d.MeshObjects))
+		b.WriteString(fmt.Sprintf("                                   RX/TX        %s / %s\n", bytesUint(d.MeshRX), bytesUint(d.MeshTX)))
 		b.WriteString("\nPOLISHÄNDELSER\n────────────────────────────\n")
 		if len(a.Events) == 0 {
 			b.WriteString("Inga sparade polishändelser.\n")
@@ -526,13 +528,13 @@ func renderDashboard(a App) string {
 	} else if width >= 80 {
 		b.WriteString(fmt.Sprintf("LOKAL DATA\nForum %s · Trådar %s · Inlägg %s · DB %s\n\n", number(d.ForumCount), number(d.ThreadCount), number(d.PostCount), bytes(d.DBSize)))
 		b.WriteString(fmt.Sprintf("AKTIVITET\nInlägg / 60m %s · Aktiva trådar %s · Nya trådar %s\n\n", number(d.PostsLastHour), number(d.ActiveThreads), number(d.NewThreads)))
-		b.WriteString(fmt.Sprintf("STATUS\nDB REDO · Nätverk %s · Session %s · Synk %s\n\nCACHE-MESH %s · GANDR ᚷ %s\n", d.Network, d.Session, d.Sync, d.Mesh, d.Gandr))
+		b.WriteString(fmt.Sprintf("STATUS\nDB REDO · Nätverk %s · Session %s · Synk %s\n\nCACHE-MESH %s · peers %d · delning %s · GANDR ᚷ %s\n", d.Network, d.Session, d.Sync, d.Mesh, d.MeshPeers, d.MeshSharing, d.Gandr))
 		b.WriteString("POLISHÄNDELSER\n" + renderEventSummary(a.Events))
 	} else {
 		b.WriteString("DATA\n")
 		b.WriteString(fmt.Sprintf("%s forum\n%s trådar\n%s inlägg\n\n", number(d.ForumCount), number(d.ThreadCount), number(d.PostCount)))
 		b.WriteString("AKTIVITET\n" + number(d.PostsLastHour) + " / 60m\n\n")
-		b.WriteString("MESH " + d.Mesh + "\nGANDR ᚷ " + d.Gandr)
+		b.WriteString("MESH " + d.Mesh + "\npeers " + number(d.MeshPeers) + " · objekt " + number(d.MeshObjects) + "\nGANDR ᚷ " + d.Gandr)
 	}
 	b.WriteString("\n\n" + muted.Render("[f] Forum  [/] Sök  [p] Polis  [m] Mesh  [g] Gandr  [h] Hem"))
 	return b.String()
@@ -559,6 +561,16 @@ func number(n int) string {
 func bytes(n int64) string {
 	if n <= 0 {
 		return "—"
+	}
+	if n < 1024*1024 {
+		return fmt.Sprintf("%d KB", n/1024)
+	}
+	return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+}
+
+func bytesUint(n uint64) string {
+	if n == 0 {
+		return "0 B"
 	}
 	if n < 1024*1024 {
 		return fmt.Sprintf("%d KB", n/1024)
@@ -616,6 +628,15 @@ func meshStateLabel(state meshruntime.State) string {
 	default:
 		return "—"
 	}
+}
+
+func (a *App) applyMeshSnapshot(snapshot meshruntime.Snapshot) {
+	a.Dashboard.Mesh = meshStateLabel(snapshot.State)
+	a.Dashboard.MeshSharing = map[bool]string{true: "PÅ", false: "AV"}[snapshot.ShareCache]
+	a.Dashboard.MeshPeers = snapshot.Peers
+	a.Dashboard.MeshObjects = snapshot.Objects
+	a.Dashboard.MeshRX = snapshot.BytesRecv
+	a.Dashboard.MeshTX = snapshot.BytesSent
 }
 
 func renderMeshDetail(snapshot meshruntime.Snapshot) string {

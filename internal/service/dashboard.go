@@ -32,6 +32,11 @@ type DashboardSnapshot struct {
 	Session       string
 	Sync          string
 	Mesh          string
+	MeshSharing   string
+	MeshPeers     int
+	MeshObjects   int
+	MeshRX        uint64
+	MeshTX        uint64
 	Gandr         string
 }
 
@@ -93,6 +98,7 @@ SELECT
 	} else {
 		out.Mesh = "AV"
 	}
+	out.MeshSharing = "AV"
 	out.Gandr = "LÅST"
 	return out, nil
 }

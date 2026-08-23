@@ -100,7 +100,7 @@ async def test_textual_searches_cached_posts(tmp_path):
     async with app.run_test() as pilot:
         await pilot.press("enter")
         await pilot.pause()
-        await pilot.press("/")
+        await pilot.press("ctrl+f")
         await pilot.press("t", "r", "o", "r")
         await pilot.press("enter")
         await pilot.pause()

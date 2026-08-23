@@ -14,6 +14,7 @@ from .segmentation import build_segments
 from .topics import discover_topics
 from .textual_app import launch_textual_tui
 from .questions import discover_questions
+from .search import SearchService
 from .urls import parse_thread_ref
 from .adapters.flashback.navigation import diagnose_nav
 
@@ -118,6 +119,27 @@ def thread_info(thread: str = typer.Argument(...), db: Path = typer.Option(DEFAU
             raise typer.BadParameter("Tråden finns inte i databasen. Kör 'fb ingest' först.")
     for key in ("thread_id", "title", "url", "first_seen_at", "last_fetched_at", "first_post", "last_post", "page_count", "posts", "users"):
         console.print(f"{key}: {summary.get(key)}")
+
+
+@app.command("paths")
+def paths() -> None:
+    """Show the exact persistent paths used by this checkout."""
+    console.print(f"Database:\n{DEFAULT_DB.resolve()}", markup=False)
+    console.print(f"HTTP cache:\n{DEFAULT_CACHE.resolve()}", markup=False)
+    console.print(f"Log:\n{(Path('data') / 'app.log').resolve()}", markup=False)
+
+
+@app.command("search")
+def search(thread: str = typer.Argument(...), query: str = typer.Argument(...), db: Path = typer.Option(DEFAULT_DB)) -> None:
+    """Search the local canonical post dataset."""
+    ref = parse_thread_ref(thread)
+    with Database(db) as database:
+        results = SearchService(database).search_posts(query, thread_id=ref.thread_id)
+    console.print(f"{len(results)} resultat")
+    for result in results:
+        console.print(f"#{result.post_id} {result.author or '?'}")
+        console.print(result.snippet[:240], markup=False)
+        console.print()
 
 
 @app.command()

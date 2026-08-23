@@ -267,6 +267,14 @@ class Database:
         self.conn.commit()
         return len(parsed.posts)
 
+    def store_thread_placeholder(self, thread_id: int, title: str, url: str) -> None:
+        """Persist a remote listing target without pretending it was ingested."""
+        self.conn.execute("""INSERT INTO threads(thread_id, title, url, page_count)
+            VALUES (?, ?, ?, 1) ON CONFLICT(thread_id) DO UPDATE SET
+            title=COALESCE(excluded.title, threads.title), url=COALESCE(excluded.url, threads.url)""",
+            (thread_id, title, url))
+        self.conn.commit()
+
     @staticmethod
     def _resolve_quote(cur: sqlite3.Cursor, thread_id: int, post_id: int | None, author: str | None, quote_text: str, source_post_id: int) -> int | None:
         if post_id is not None and cur.execute("SELECT 1 FROM posts WHERE post_id=? AND thread_id=?", (post_id, thread_id)).fetchone():

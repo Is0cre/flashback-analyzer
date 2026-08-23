@@ -47,3 +47,13 @@ def test_search_posts_uses_local_fts_and_can_limit_to_thread(tmp_path):
         assert [row["post_id"] for row in db.search_posts("tror")] == [1001]
         assert [row["post_id"] for row in db.search_posts("Alice", thread_id=999)] == [1001]
         assert db.search_posts("missing") == []
+
+
+def test_ingested_posts_and_search_survive_database_restart(tmp_path):
+    db_path = tmp_path / "persistent.sqlite3"
+    parsed = parse_thread_page(FIXTURE.read_text(), thread_id=999, page=1)
+    with Database(db_path) as db:
+        db.store_page(parsed)
+    with Database(db_path) as db:
+        assert [row["post_id"] for row in db.thread_posts(999)] == [1001, 1002]
+        assert [row["post_id"] for row in db.search_posts("tror")] == [1001]

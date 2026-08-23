@@ -13,6 +13,8 @@ from .database import Database
 from .fetcher import Fetcher
 from .navigation_service import NavigationService
 from .parser import parse_thread_page
+from .search import SearchResult, SearchService
+from .adapters.flashback.search import FlashbackSearchAdapter
 
 
 class ThreadItem(ListItem):
@@ -51,6 +53,13 @@ class ForumThreadItem(ListItem):
         super().__init__(Label(f"{'📌 ' if sticky else ''}{title or f't{thread_id}'}{suffix}", markup=False))
 
 
+class RemoteSearchItem(ListItem):
+    def __init__(self, result: SearchResult) -> None:
+        self.result = result
+        detail = f"#{result.post_id or '?'} {result.author or '?'} · {result.forum or 'okänt forum'}"
+        super().__init__(Label(Text(f"{detail}\n  {result.title}: {result.snippet[:160]}", overflow="ellipsis"), markup=False))
+
+
 class FlashbackApp(App[None]):
     CSS = """
     Screen { background: $surface; }
@@ -69,7 +78,9 @@ class FlashbackApp(App[None]):
         Binding("J", "next_unread", "Next unread"), Binding("K", "previous_unread", "Previous unread"),
         Binding("g", "first", "First", show=False), Binding("G", "last", "Last", show=False),
         Binding("n", "toggle_unread", "Unread only"), Binding("enter", "detail", "Open"),
-        Binding("/", "search", "Search"),
+        Binding("/", "remote_search", "Remote search"), Binding("ctrl+f", "local_search", "Local search"),
+        Binding("]", "remote_next", "Next remote result page"), Binding("[", "remote_previous", "Previous remote result page"),
+        Binding("p", "remote_previous", "Previous remote result page", show=False),
         Binding("f", "forums", "Forums"), Binding("t", "tracked", "Tracked"),
         Binding("b", "up", "Up"), Binding("r", "refresh", "Refresh"),
         Binding("q", "back", "Back / quit"), Binding("?", "help", "Help"),
@@ -88,6 +99,11 @@ class FlashbackApp(App[None]):
         self.forum_mode = False
         self.forum_stack: list[int] = []
         self.search_active = False
+        self.search_mode: str | None = None
+        self.remote_query = ""
+        self.remote_page = 1
+        self.remote_results: list[SearchResult] = []
+        self.pending_post_id: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -209,6 +225,15 @@ class FlashbackApp(App[None]):
         self.notify("Ingesting thread…")
         self.run_worker(lambda: self._ingest_thread(thread_id, str(row["url"])), thread=True, exclusive=True)
 
+    def _open_remote_result(self, result: SearchResult) -> None:
+        if self.database is None or result.thread_id is None:
+            self.notify("Remote result has no resolvable thread target.", severity="warning")
+            return
+        self.pending_post_id = result.post_id
+        thread_url = f"https://www.flashback.org/t{result.thread_id}"
+        self.database.store_thread_placeholder(result.thread_id, result.title, thread_url)
+        self._open_forum_thread(result.thread_id)
+
     def _ingest_thread(self, thread_id: int, url: str) -> None:
         try:
             with Fetcher(self.db_path.parent / "cache") as fetcher:
@@ -232,6 +257,18 @@ class FlashbackApp(App[None]):
         self.unread_only = False
         self._render_posts()
         self.query_one("#post-list", ListView).focus()
+        if self.pending_post_id is not None:
+            pending = self.pending_post_id
+            self.pending_post_id = None
+            self._jump_to_post(pending)
+
+    def _jump_to_post(self, post_id: int) -> None:
+        for index, row in enumerate(self.visible_posts):
+            if int(row["post_id"]) == post_id:
+                view = self.query_one("#post-list", ListView)
+                view.index = index
+                self._show_post(row)
+                return
 
     def _render_posts(self) -> None:
         if self.database is None or self.thread_id is None:
@@ -306,27 +343,84 @@ class FlashbackApp(App[None]):
             view.index = len(self.visible_posts) - 1; self._show_post(self.visible_posts[-1])
 
     def action_toggle_unread(self) -> None:
+        if self.search_mode == "remote":
+            self.action_remote_next()
+            return
         if self.thread_id is not None:
             self.unread_only = not self.unread_only; self._render_posts()
 
-    def action_search(self) -> None:
-        self.push_screen(SearchScreen(), self.action_search_results)
+    def action_remote_search(self) -> None:
+        self.push_screen(SearchScreen("remote"), self._remote_query_submitted)
+
+    def action_local_search(self) -> None:
+        self.push_screen(SearchScreen("local"), self.action_search_results)
 
     def action_search_results(self, query: str | None) -> None:
         if self.database is None or not query:
             return
-        results = self.database.search_posts(query, thread_id=self.thread_id)
+        results = SearchService(self.database).search_posts(query, thread_id=self.thread_id)
         self.search_active = True
-        self.visible_posts = results
+        self.search_mode = "local"
+        self.query_one("#center-title", Label).update(f"SEARCH LOCAL: {query}")
+        rows = self.database.thread_posts(self.thread_id) if self.thread_id is not None else []
+        by_id = {int(row["post_id"]): row for row in rows}
+        self.visible_posts = [by_id[int(result.post_id)] for result in results if result.post_id in by_id]
         view = self.query_one("#post-list", ListView)
         view.clear()
-        for row in results:
+        for row in self.visible_posts:
             view.append(PostItem(int(row["post_id"]), str(row["username"]), row["posted_at"], str(row["text"]), False))
-        if results:
+        if self.visible_posts:
             view.index = 0
-            self._show_post(results[0])
+            self._show_post(self.visible_posts[0])
         else:
             self.query_one("#detail", Static).update(f"No cached posts matched: {query}")
+
+    def _remote_query_submitted(self, query: str | None) -> None:
+        if not query:
+            return
+        self.remote_query = query
+        self.remote_page = 1
+        self._start_remote_search()
+
+    def _start_remote_search(self) -> None:
+        self.notify("Searching Flashback…")
+        self.run_worker(lambda: self._remote_search_worker(self.remote_query, self.remote_page), thread=True, exclusive=True)
+
+    def _remote_search_worker(self, query: str, page: int) -> None:
+        try:
+            with Fetcher(self.db_path.parent / "cache") as fetcher:
+                results = FlashbackSearchAdapter(fetcher).search(query, page=page)
+            self.call_from_thread(self._show_remote_results, results)
+        except Exception as exc:
+            self.call_from_thread(self.notify, f"Remote search failed; local content remains available: {exc}", severity="warning")
+
+    def _show_remote_results(self, results: list[SearchResult]) -> None:
+        self.remote_results = results
+        self.search_mode = "remote"
+        self.search_active = False
+        self.thread_id = None
+        self.forum_mode = False
+        self.query_one("#center-title", Label).update(f"SEARCH: {self.remote_query} · page {self.remote_page} · remote")
+        view = self.query_one("#post-list", ListView)
+        view.clear()
+        for result in results:
+            view.append(RemoteSearchItem(result))
+        if results:
+            view.index = 0
+            self.query_one("#detail", Static).update("Select a remote result to open or ingest it.")
+        else:
+            self.query_one("#detail", Static).update("No remote results.")
+        view.focus()
+
+    def action_remote_next(self) -> None:
+        if self.search_mode == "remote":
+            self.remote_page += 1
+            self._start_remote_search()
+
+    def action_remote_previous(self) -> None:
+        if self.search_mode == "remote" and self.remote_page > 1:
+            self.remote_page -= 1
+            self._start_remote_search()
 
     def action_forums(self) -> None:
         self.thread_id = None
@@ -361,6 +455,14 @@ class FlashbackApp(App[None]):
             self._mark_seen(row); self._load_threads()
 
     def action_back(self) -> None:
+        if self.search_mode == "remote":
+            self.search_mode = None
+            self.remote_results = []
+            self.remote_query = ""
+            self.query_one("#post-list", ListView).clear()
+            self.query_one("#center-title", Label).update("POSTS")
+            self._set_tracked_mode()
+            return
         if self.search_active:
             self.search_active = False
             self.unread_only = False
@@ -390,6 +492,8 @@ class FlashbackApp(App[None]):
             self.action_up()
         elif isinstance(event.item, ForumThreadItem):
             self._open_forum_thread(event.item.thread_id)
+        elif isinstance(event.item, RemoteSearchItem):
+            self._open_remote_result(event.item.result)
         elif isinstance(event.item, PostItem) and self.visible_posts:
             row = next((row for row in self.visible_posts if int(row["post_id"]) == event.item.post_id), self.visible_posts[0]); self._show_post(row); self._mark_seen(row)
 
@@ -403,7 +507,7 @@ class FlashbackApp(App[None]):
 
 class HelpScreen(Screen[None]):
     def compose(self) -> ComposeResult:
-        yield Static("FLASHBACK READER\n\n↑/↓ or j/k   move\nEnter         open / mark read\nJ/K           next / previous unread\ng/G           first / last\nn              unread-only\nq              back / quit\n?              this help\n\nPress q to close.")
+        yield Static("FLASHBACK READER\n\n↑/↓ or j/k   move\nEnter         open / mark read\nJ/K           next / previous unread\ng/G           first / last\nn              unread-only / next remote page\n/              remote Flashback search\nCtrl-F         local cached search\n[ / ] / p      remote result pages\nq              back / quit\n?              this help\n\nPress q to close.", markup=False)
 
     def on_key(self, event: object) -> None:
         if getattr(event, "key", None) in {"q", "escape"}:
@@ -411,7 +515,11 @@ class HelpScreen(Screen[None]):
 
 
 class SearchScreen(Screen[str | None]):
-    """Small local-search prompt; it never contacts Flashback."""
+    """Prompt for either remote Flashback or local canonical search."""
+
+    def __init__(self, mode: str) -> None:
+        super().__init__()
+        self.mode = mode
 
     CSS = """
     SearchScreen { align: center middle; }
@@ -420,8 +528,8 @@ class SearchScreen(Screen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="search-box"):
-            yield Label("SEARCH CACHED POSTS")
-            yield Input(placeholder="text or username", id="search-input")
+            yield Label("SEARCH FLASHBACK" if self.mode == "remote" else "SEARCH LOCAL")
+            yield Input(placeholder="keyword", id="search-input")
             yield Label("Enter search · Escape cancel", classes="panel-title")
 
     def on_mount(self) -> None:

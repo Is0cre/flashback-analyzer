@@ -49,3 +49,17 @@ func TestGandrStartsLocked(t *testing.T) {
 		t.Fatalf("Gandr ska starta låst, fick %q", got)
 	}
 }
+
+func TestDashboardHasSingleHeadingAndFitsWideLayout(t *testing.T) {
+	a := New(nil, nil)
+	a.Width = 128
+	view := a.View()
+	if got := strings.Count(view, "BACKFLASH // DISKURS-NOC"); got != 1 {
+		t.Fatalf("dashboardrubriken visas %d gånger", got)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if len([]rune(line)) > a.Width+2 {
+			t.Fatalf("dashboardrad klipper utanför terminalbredden: %q", line)
+		}
+	}
+}

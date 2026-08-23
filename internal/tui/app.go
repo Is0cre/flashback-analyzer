@@ -504,28 +504,50 @@ func renderDashboard(a App) string {
 		width = 120
 	}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("BACKFLASH // DISKURS-NOC"))
-	b.WriteString("\n\n")
 	if width >= 120 {
-		b.WriteString("LOKAL DATA                         AKTIVITET                         STATUS\n")
-		b.WriteString("────────────────────────────       ────────────────────────────       ───────────────\n")
-		b.WriteString(fmt.Sprintf("Forum        %s                     Inlägg / 60m  %s                  DB        REDO\n", number(d.ForumCount), number(d.PostsLastHour)))
-		b.WriteString(fmt.Sprintf("Trådar       %s                     Aktiva trådar %s                  Nätverk   %s\n", number(d.ThreadCount), number(d.ActiveThreads), d.Network))
-		b.WriteString(fmt.Sprintf("Inlägg       %s                     Aktiva forum  %s                  Session   %s\n", number(d.PostCount), number(d.ActiveForums), d.Session))
-		b.WriteString(fmt.Sprintf("DB           %s                     Nya trådar    %s                  Synk      %s\n", bytes(d.DBSize), number(d.NewThreads), d.Sync))
-		b.WriteString("\nHETAST JUST NU                    CACHE-MESH                         GANDR\n")
-		b.WriteString("────────────────────────────       ────────────────────────────       ───────────────\n")
-		b.WriteString(renderHot(d.HotThreads))
-		b.WriteString(fmt.Sprintf("                                   Yggdrasil    %s                 ᚷ %s\n", d.Mesh, d.Gandr))
-		b.WriteString(fmt.Sprintf("                                   Peers        %d                 privat läge\n", d.MeshPeers))
-		b.WriteString(fmt.Sprintf("                                   Delning      %s                 objekt %d\n", d.MeshSharing, d.MeshObjects))
-		b.WriteString(fmt.Sprintf("                                   RX/TX        %s / %s\n", bytesUint(d.MeshRX), bytesUint(d.MeshTX)))
-		b.WriteString("\nPOLISHÄNDELSER\n────────────────────────────\n")
-		if len(a.Events) == 0 {
-			b.WriteString("Inga sparade polishändelser.\n")
-		} else {
-			b.WriteString(renderEventSummary(a.Events))
+		columnWidth := (width - 6) / 3
+		b.WriteString(joinPanels(
+			renderPanel("LOKAL DATA", []string{
+				fmt.Sprintf("Forum       %s", number(d.ForumCount)),
+				fmt.Sprintf("Trådar      %s", number(d.ThreadCount)),
+				fmt.Sprintf("Inlägg      %s", number(d.PostCount)),
+				fmt.Sprintf("DB          %s", bytes(d.DBSize)),
+			}, columnWidth),
+			renderPanel("AKTIVITET", []string{
+				fmt.Sprintf("Inlägg / 60m     %s", number(d.PostsLastHour)),
+				fmt.Sprintf("Aktiva trådar    %s", number(d.ActiveThreads)),
+				fmt.Sprintf("Aktiva forum     %s", number(d.ActiveForums)),
+				fmt.Sprintf("Nya trådar       %s", number(d.NewThreads)),
+			}, columnWidth),
+			renderPanel("STATUS", []string{
+				"DB          REDO",
+				fmt.Sprintf("Nätverk     %s", d.Network),
+				fmt.Sprintf("Session     %s", d.Session),
+				fmt.Sprintf("Synk        %s", d.Sync),
+			}, columnWidth),
+		))
+		b.WriteString("\n\n")
+		b.WriteString(joinPanels(
+			renderPanel("HETAST JUST NU", hotLines(d.HotThreads), columnWidth),
+			renderPanel("CACHE-MESH", []string{
+				fmt.Sprintf("Yggdrasil   %s", d.Mesh),
+				fmt.Sprintf("Peers       %d", d.MeshPeers),
+				fmt.Sprintf("Delning     %s", d.MeshSharing),
+				fmt.Sprintf("Objekt      %d", d.MeshObjects),
+				fmt.Sprintf("RX/TX       %s / %s", bytesUint(d.MeshRX), bytesUint(d.MeshTX)),
+			}, columnWidth),
+			renderPanel("GANDR", []string{
+				fmt.Sprintf("ᚷ           %s", d.Gandr),
+				"Privat läge",
+				"Ingen data delas",
+			}, columnWidth),
+		))
+		b.WriteString("\n\n")
+		eventLines := []string{"Inga sparade polishändelser."}
+		if len(a.Events) > 0 {
+			eventLines = strings.Split(strings.TrimSuffix(renderEventSummary(a.Events), "\n"), "\n")
 		}
+		b.WriteString(strings.Join(renderPanel("POLISHÄNDELSER", eventLines, width), "\n"))
 	} else if width >= 80 {
 		b.WriteString(fmt.Sprintf("LOKAL DATA\nForum %s · Trådar %s · Inlägg %s · DB %s\n\n", number(d.ForumCount), number(d.ThreadCount), number(d.PostCount), bytes(d.DBSize)))
 		b.WriteString(fmt.Sprintf("AKTIVITET\nInlägg / 60m %s · Aktiva trådar %s · Nya trådar %s\n\n", number(d.PostsLastHour), number(d.ActiveThreads), number(d.NewThreads)))
@@ -542,14 +564,81 @@ func renderDashboard(a App) string {
 }
 
 func renderHot(rows []service.HotThread) string {
+	return strings.Join(hotLines(rows), "\n") + "\n"
+}
+
+func hotLines(rows []service.HotThread) []string {
 	if len(rows) == 0 {
-		return "—                                "
+		return []string{"—"}
+	}
+	lines := make([]string, 0, min(len(rows), 3))
+	for _, row := range rows[:min(len(rows), 3)] {
+		lines = append(lines, fmt.Sprintf("▲ %4s/h  %s", number(row.Posts), row.Title))
+	}
+	return lines
+}
+
+func renderPanel(title string, lines []string, width int) []string {
+	if width < 1 {
+		return nil
+	}
+	out := []string{clip(title, width), strings.Repeat("─", width)}
+	for _, line := range lines {
+		out = append(out, clip(line, width))
+	}
+	for len(out) < 6 {
+		out = append(out, "")
+	}
+	for i, line := range out {
+		out[i] = line + strings.Repeat(" ", width-displayWidth(line))
+	}
+	return out
+}
+
+func joinPanels(panels ...[]string) string {
+	maxRows := 0
+	for _, panel := range panels {
+		if len(panel) > maxRows {
+			maxRows = len(panel)
+		}
 	}
 	var b strings.Builder
-	for _, row := range rows[:min(len(rows), 3)] {
-		b.WriteString(fmt.Sprintf("▲ %4s/h  %s\n", number(row.Posts), row.Title))
+	for row := 0; row < maxRows; row++ {
+		for i, panel := range panels {
+			if i > 0 {
+				b.WriteString("   ")
+			}
+			if row < len(panel) {
+				b.WriteString(panel[row])
+			}
+		}
+		if row+1 < maxRows {
+			b.WriteByte('\n')
+		}
 	}
 	return b.String()
+}
+
+func displayWidth(value string) int {
+	return lipgloss.Width(value)
+}
+
+func clip(value string, width int) string {
+	if displayWidth(value) <= width {
+		return value
+	}
+	if width <= 1 {
+		return "…"
+	}
+	for len([]rune(value)) > 0 {
+		runes := []rune(value)
+		candidate := string(runes[:len(runes)-1]) + "…"
+		if displayWidth(candidate) <= width {
+			return candidate
+		}
+		value = string(runes[:len(runes)-1])
+	}
+	return "…"
 }
 
 func number(n int) string {

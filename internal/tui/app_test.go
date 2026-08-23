@@ -21,7 +21,7 @@ func TestNewStartsOnDashboard(t *testing.T) {
 	if a.CurrentView != ViewOverview {
 		t.Fatalf("startade på vy %v, väntade översikt", a.CurrentView)
 	}
-	if !strings.Contains(a.View(), "DISKURS-NOC") {
+	if !strings.Contains(a.View(), "BACKFLASH // DISKURS-NOC") {
 		t.Fatal("dashboard saknar BACKFLASH-diskurs-NOC")
 	}
 }

@@ -474,7 +474,7 @@ func renderDashboard(a App) string {
 		width = 120
 	}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("ÖVERSIKT · DISKURS-NOC"))
+	b.WriteString(titleStyle.Render("BACKFLASH // DISKURS-NOC"))
 	b.WriteString("\n\n")
 	if width >= 120 {
 		b.WriteString("LOKAL DATA                         AKTIVITET                         STATUS\n")

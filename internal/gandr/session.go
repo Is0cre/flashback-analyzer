@@ -2,11 +2,15 @@ package gandr
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"path/filepath"
+	"strings"
+	"time"
 
 	gandrclientdb "github.com/gandr-net/gandr/pkg/clientdb"
+	gandrcrypto "github.com/gandr-net/gandr/pkg/crypto"
 	gandridentity "github.com/gandr-net/gandr/pkg/identity"
 	"github.com/gandr-net/gandr/pkg/ipc"
 	"github.com/gandr-net/gandr/pkg/proto"
@@ -20,6 +24,7 @@ type Session struct {
 	db     *gandrclientdb.DB
 	client *ipc.Client
 	id     *gandridentity.Identity
+	groups map[[32]byte][32]byte
 }
 
 // Connect opens GANDR's encrypted client database. Network transport is
@@ -49,7 +54,7 @@ func (s *Subsystem) Connect(socketPath string) (*Session, error) {
 			return nil, err
 		}
 	}
-	return &Session{db: db, client: client, id: id}, nil
+	return &Session{db: db, client: client, id: id, groups: make(map[[32]byte][32]byte)}, nil
 }
 
 // Close releases the private client database and IPC connection.
@@ -129,7 +134,9 @@ func (s *Session) Leave(ctx context.Context, id [32]byte) ([]Channel, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("GANDR-sessionen är inte aktiv")
 	}
-	_ = s.client.Unsubscribe(ctx, id)
+	if s.client != nil {
+		_ = s.client.Unsubscribe(ctx, id)
+	}
 	if err := s.db.LeaveChannel(id); err != nil {
 		return nil, err
 	}
@@ -140,9 +147,6 @@ func (s *Session) SendChannel(ctx context.Context, id [32]byte, content string) 
 	if s == nil || s.id == nil {
 		return errors.New("GANDR-sessionen är inte aktiv")
 	}
-	if s.client == nil {
-		return nil
-	}
 	payload, err := proto.EncodePayload(&proto.ChatPayload{ChannelID: id, Content: content})
 	if err != nil {
 		return err
@@ -151,7 +155,15 @@ func (s *Session) SendChannel(ctx context.Context, id [32]byte, content string) 
 	if err != nil {
 		return err
 	}
-	return s.client.Send(ctx, env)
+	if s.client != nil {
+		if err := s.client.Send(ctx, env); err != nil {
+			return err
+		}
+	}
+	return s.SaveMessage(ChatMessage{
+		Hash: env.ContentID(), ChannelID: id, Sender: env.Sender,
+		Content: content, At: env.Timestamp, Local: true,
+	})
 }
 
 func (s *Session) Online() bool { return s != nil && s.client != nil }
@@ -170,6 +182,34 @@ type Contact struct {
 	Name      string
 	Note      string
 	TrustHint uint8
+}
+
+type ChatMessage struct {
+	Hash      [32]byte
+	ChannelID [32]byte
+	Sender    [32]byte
+	Content   string
+	At        int64
+	Local     bool
+}
+
+type PrivateGroup struct {
+	ID        [32]byte
+	Name      string
+	CreatedAt int64
+}
+
+type PrivateGroupMessage struct {
+	Hash    [32]byte
+	GroupID [32]byte
+	Sender  [32]byte
+	Content string
+	At      int64
+}
+
+type Peer struct {
+	Identity [32]byte
+	Address  string
 }
 
 var DefaultChannels = []string{"general", "support", "backflash", "offtopic"}
@@ -208,6 +248,157 @@ func (s *Session) Contacts() ([]Contact, error) {
 	return out, nil
 }
 
+// AddContact stores a local-only friend/petname. It is never serialized into
+// a network message or public BACKFLASH cache object.
+func (s *Session) AddContact(pubkey [32]byte, name, note string) error {
+	if s == nil || s.db == nil {
+		return errors.New("GANDR-sessionen är inte aktiv")
+	}
+	return s.db.SetNickname(gandrclientdb.Nickname{Pubkey: pubkey, Name: name, Note: note})
+}
+
+func (s *Session) SaveMessage(m ChatMessage) error {
+	if s == nil || s.db == nil {
+		return errors.New("GANDR-sessionen är inte aktiv")
+	}
+	return s.db.SaveChatMessage(gandrclientdb.ChatMessage{
+		Hash: m.Hash, ChannelID: m.ChannelID, Sender: m.Sender,
+		Content: m.Content, At: m.At, Local: m.Local,
+	})
+}
+
+func (s *Session) Messages(channelID [32]byte, limit int) ([]ChatMessage, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("GANDR-sessionen är inte aktiv")
+	}
+	items, err := s.db.ListChatMessages(channelID, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ChatMessage, 0, len(items))
+	for _, item := range items {
+		out = append(out, ChatMessage{
+			Hash: item.Hash, ChannelID: item.ChannelID, Sender: item.Sender,
+			Content: item.Content, At: item.At, Local: item.Local,
+		})
+	}
+	return out, nil
+}
+
+func (s *Session) CreatePrivateGroup(name, password string) (PrivateGroup, error) {
+	if s == nil || s.db == nil {
+		return PrivateGroup{}, errors.New("GANDR-sessionen är inte aktiv")
+	}
+	if strings.TrimSpace(name) == "" {
+		return PrivateGroup{}, errors.New("gruppnamn saknas")
+	}
+	var id [32]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return PrivateGroup{}, err
+	}
+	key, err := gandrcrypto.NewGroupKey()
+	if err != nil {
+		return PrivateGroup{}, err
+	}
+	salt, err := gandrcrypto.NewGroupSalt()
+	if err != nil {
+		return PrivateGroup{}, err
+	}
+	wrapped, err := gandrcrypto.WrapGroupKey([]byte(password), salt, id, key)
+	if err != nil {
+		return PrivateGroup{}, err
+	}
+	created := time.Now().UnixNano()
+	if err := s.db.SavePrivateGroup(gandrclientdb.PrivateGroup{
+		ID: id, Name: strings.TrimSpace(name), Salt: salt[:], WrappedKey: wrapped, CreatedAt: created,
+	}); err != nil {
+		return PrivateGroup{}, err
+	}
+	s.groups[id] = key
+	return PrivateGroup{ID: id, Name: strings.TrimSpace(name), CreatedAt: created}, nil
+}
+
+func (s *Session) PrivateGroups() ([]PrivateGroup, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("GANDR-sessionen är inte aktiv")
+	}
+	items, err := s.db.ListPrivateGroups()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PrivateGroup, 0, len(items))
+	for _, item := range items {
+		out = append(out, PrivateGroup{ID: item.ID, Name: item.Name, CreatedAt: item.CreatedAt})
+	}
+	return out, nil
+}
+
+func (s *Session) UnlockPrivateGroup(id [32]byte, password string) error {
+	if s == nil || s.db == nil {
+		return errors.New("GANDR-sessionen är inte aktiv")
+	}
+	items, err := s.db.ListPrivateGroups()
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if item.ID != id {
+			continue
+		}
+		if len(item.Salt) != gandrcrypto.GroupSaltSize {
+			return errors.New("ogiltig gruppsalt")
+		}
+		var salt [gandrcrypto.GroupSaltSize]byte
+		copy(salt[:], item.Salt)
+		key, err := gandrcrypto.UnwrapGroupKey([]byte(password), salt, id, item.WrappedKey)
+		if err != nil {
+			return errors.New("fel grupp-lösenord")
+		}
+		s.groups[id] = key
+		return nil
+	}
+	return errors.New("gruppen finns inte lokalt")
+}
+
+func (s *Session) SendPrivateGroup(id [32]byte, content string) (PrivateGroupMessage, error) {
+	key, ok := s.groups[id]
+	if !ok {
+		return PrivateGroupMessage{}, errors.New("gruppen är låst")
+	}
+	blob, err := gandrcrypto.EncryptGroup(key, id, []byte(content))
+	if err != nil {
+		return PrivateGroupMessage{}, err
+	}
+	hash := gandrcrypto.Digest(id[:], blob)
+	var sender [32]byte
+	copy(sender[:], s.id.PublicKey)
+	message := gandrclientdb.PrivateGroupMessage{Hash: hash, GroupID: id, Sender: sender, Ciphertext: blob, MessageAt: time.Now().UnixNano()}
+	if err := s.db.SavePrivateGroupMessage(message); err != nil {
+		return PrivateGroupMessage{}, err
+	}
+	return PrivateGroupMessage{Hash: hash, GroupID: id, Sender: sender, Content: content, At: message.MessageAt}, nil
+}
+
+func (s *Session) PrivateGroupMessages(id [32]byte, limit int) ([]PrivateGroupMessage, error) {
+	key, ok := s.groups[id]
+	if !ok {
+		return nil, errors.New("gruppen är låst")
+	}
+	items, err := s.db.ListPrivateGroupMessages(id, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PrivateGroupMessage, 0, len(items))
+	for _, item := range items {
+		plain, err := gandrcrypto.DecryptGroup(key, id, item.Ciphertext)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, PrivateGroupMessage{Hash: item.Hash, GroupID: item.GroupID, Sender: item.Sender, Content: string(plain), At: item.MessageAt})
+	}
+	return out, nil
+}
+
 func (s *Session) Block(pubkey [32]byte, reason string) error {
 	if s == nil || s.db == nil {
 		return errors.New("GANDR-sessionen är inte aktiv")
@@ -215,11 +406,28 @@ func (s *Session) Block(pubkey [32]byte, reason string) error {
 	return s.db.Block(pubkey, reason)
 }
 
+func (s *Session) Peers(ctx context.Context) ([]Peer, error) {
+	if s == nil || s.client == nil {
+		return nil, nil
+	}
+	items, err := s.client.PeerList(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Peer, 0, len(items))
+	for _, item := range items {
+		out = append(out, Peer{Identity: item.Identity, Address: item.Addr})
+	}
+	return out, nil
+}
+
 type Message struct {
+	Hash      [32]byte
 	ChannelID [32]byte
 	Sender    [32]byte
 	Content   string
 	At        int64
+	Local     bool
 }
 
 func DecodeChat(env *proto.Envelope) (Message, error) {
@@ -231,6 +439,7 @@ func DecodeChat(env *proto.Envelope) (Message, error) {
 		return Message{}, err
 	}
 	return Message{
+		Hash:      env.ContentID(),
 		ChannelID: payload.ChannelID,
 		Sender:    env.Sender,
 		Content:   payload.Content,

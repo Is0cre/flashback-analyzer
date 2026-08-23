@@ -2,6 +2,7 @@ package gandr
 
 import (
 	"errors"
+	"os"
 	"testing"
 
 	gandridentity "github.com/gandr-net/gandr/pkg/identity"
@@ -27,6 +28,25 @@ func TestMissingVaultCanBeCreatedWithoutOverwriting(t *testing.T) {
 	}
 	if err := subsystem.Create("annat"); err == nil {
 		t.Fatal("ett befintligt valv skrevs över")
+	}
+}
+
+func TestDeleteVaultRemovesOnlyGandrFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/identity.key"
+	subsystem := NewAt(path)
+	if err := subsystem.Create("hemligt"); err != nil {
+		t.Fatal(err)
+	}
+	subsystem.Lock()
+	if err := subsystem.DeleteVault(); err != nil {
+		t.Fatal(err)
+	}
+	if subsystem.HasVault() {
+		t.Fatal("GANDR-valvet finns kvar efter radering")
+	}
+	if _, err := os.Stat(dir + "/client.db"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("GANDR client.db finns kvar: %v", err)
 	}
 }
 

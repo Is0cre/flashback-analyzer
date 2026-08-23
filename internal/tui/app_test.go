@@ -52,6 +52,46 @@ func TestGandrStartsLocked(t *testing.T) {
 	}
 }
 
+func TestGandrVaultResetIsReachableWithoutPassword(t *testing.T) {
+	subsystem := gandr.NewAt(filepath.Join(t.TempDir(), "gandr", "identity.key"))
+	if err := subsystem.Create("gammalt-losenord"); err != nil {
+		t.Fatal(err)
+	}
+	a := New(nil, nil)
+	a.CurrentView = ViewGandr
+	a.Gandr = subsystem
+	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	updated := model.(App)
+	if !updated.GandrDeleteConfirm || !updated.Input.Focused() {
+		t.Fatal("x öppnade inte den gated valvraderingen")
+	}
+	if updated.Input.Placeholder != "Skriv RADERA för att bekräfta" {
+		t.Fatalf("oväntad bekräftelsetext: %q", updated.Input.Placeholder)
+	}
+}
+
+func TestGandrChatShowsUsersAndMeshPresence(t *testing.T) {
+	var onlineID [32]byte
+	onlineID[0] = 0x42
+	var offlineID [32]byte
+	offlineID[0] = 0x99
+	a := New(nil, nil)
+	a.CurrentView = ViewGandrChat
+	a.Width = 120
+	a.GandrContacts = []gandr.Contact{
+		{Pubkey: onlineID, Name: "gröna katten"},
+		{Pubkey: offlineID, Name: "gammal vän"},
+	}
+	a.GandrPeers = []gandr.Peer{{Identity: onlineID}}
+	view := a.View()
+	if !strings.Contains(view, "ANVÄNDARE") {
+		t.Fatal("GANDR-vyn saknar användarpanel")
+	}
+	if !strings.Contains(view, "PÅ MESH") || !strings.Contains(view, "EJ PÅ MESH") {
+		t.Fatalf("GANDR-vyn visar inte båda närvarolägena: %q", view)
+	}
+}
+
 func TestDashboardHasSingleHeadingAndFitsWideLayout(t *testing.T) {
 	a := New(nil, nil)
 	a.Width = 128

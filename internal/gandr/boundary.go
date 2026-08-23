@@ -138,6 +138,31 @@ func (s *Subsystem) Lock() {
 	s.lastError = nil
 }
 
+// DeleteVault permanently removes this GANDR identity and its private client
+// database. The caller must perform an explicit confirmation first.
+// PRIVACY INVARIANT: this never touches BACKFLASH storage, mesh identity,
+// Flashback cookies, or public cache objects.
+func (s *Subsystem) DeleteVault() error {
+	if s == nil {
+		return errors.New("GANDR-gränsen saknas")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.identity != nil {
+		return errors.New("lås GANDR-valvet innan radering")
+	}
+	if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	clientDB := filepath.Join(filepath.Dir(s.path), "client.db")
+	if err := os.Remove(clientDB); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	s.state = Missing
+	s.lastError = nil
+	return nil
+}
+
 func (s *Subsystem) Summary() Summary {
 	if s == nil {
 		return Summary{State: Locked}

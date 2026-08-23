@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -75,6 +76,8 @@ type gandrMsg struct {
 type gandrSessionMsg struct {
 	session  *gandr.Session
 	channels []gandr.Channel
+	peers    []gandr.Peer
+	groups   []gandr.PrivateGroup
 	err      error
 }
 
@@ -88,45 +91,66 @@ type gandrChannelsMsg struct {
 }
 
 type gandrStatusMsg struct{ err error }
+type gandrDeleteMsg struct{ err error }
+type gandrPeersMsg struct {
+	peers []gandr.Peer
+	err   error
+}
+
+type gandrContactMsg struct{ err error }
+type gandrGroupMsg struct {
+	groups   []gandr.PrivateGroup
+	active   *[32]byte
+	messages []gandr.PrivateGroupMessage
+	err      error
+}
 
 type meshTickMsg struct{}
+type gandrPeerTickMsg struct{}
 type App struct {
-	Store            *store.Store
-	Client           *flashback.Client
-	CurrentView      View
-	Width            int
-	Height           int
-	Forums           []flashback.ForumNode
-	Threads          []flashback.ThreadSummary
-	Posts            []flashback.Post
-	ThreadID         string
-	ThreadTitle      string
-	Results          []flashback.SearchResult
-	Stack            []flashback.ForumNode
-	Cursor           int
-	Status           string
-	Input            textinput.Model
-	SearchRemote     bool
-	Query            string
-	RemotePage       int
-	Events           []external.ExternalEvent
-	EventDetail      *external.ExternalEvent
-	EventService     *service.ExternalEventsService
-	Dashboard        service.DashboardSnapshot
-	DashboardSvc     *service.DashboardService
-	Gandr            *gandr.Subsystem
-	GandrCreating    bool
-	GandrConfirming  bool
-	GandrPassphrase  string
-	GandrFailures    int
-	GandrLockedUntil time.Time
-	GandrSession     *gandr.Session
-	GandrChannels    []gandr.Channel
-	GandrMessages    map[[32]byte][]gandr.Message
-	GandrContacts    []gandr.Contact
-	GandrRightCursor int
-	MeshRuntime      *meshruntime.Runtime
-	MeshState        meshruntime.Snapshot
+	Store              *store.Store
+	Client             *flashback.Client
+	CurrentView        View
+	Width              int
+	Height             int
+	Forums             []flashback.ForumNode
+	Threads            []flashback.ThreadSummary
+	Posts              []flashback.Post
+	ThreadID           string
+	ThreadTitle        string
+	Results            []flashback.SearchResult
+	Stack              []flashback.ForumNode
+	Cursor             int
+	Status             string
+	Input              textinput.Model
+	SearchRemote       bool
+	Query              string
+	RemotePage         int
+	Events             []external.ExternalEvent
+	EventDetail        *external.ExternalEvent
+	EventService       *service.ExternalEventsService
+	Dashboard          service.DashboardSnapshot
+	DashboardSvc       *service.DashboardService
+	Gandr              *gandr.Subsystem
+	GandrCreating      bool
+	GandrConfirming    bool
+	GandrPassphrase    string
+	GandrFailures      int
+	GandrLockedUntil   time.Time
+	GandrDeleteConfirm bool
+	GandrRecreate      bool
+	GandrSession       *gandr.Session
+	GandrChannels      []gandr.Channel
+	GandrMessages      map[[32]byte][]gandr.Message
+	GandrContacts      []gandr.Contact
+	GandrPeers         []gandr.Peer
+	GandrAddMode       bool
+	GandrGroups        []gandr.PrivateGroup
+	GandrActiveGroup   *[32]byte
+	GandrGroupMessages map[[32]byte][]gandr.PrivateGroupMessage
+	GandrRightCursor   int
+	MeshRuntime        *meshruntime.Runtime
+	MeshState          meshruntime.Snapshot
 }
 
 var (
@@ -287,23 +311,77 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.GandrSession = m.session
 		a.GandrChannels = m.channels
+		a.GandrPeers = m.peers
+		a.GandrGroups = m.groups
+		a.GandrActiveGroup = nil
+		a.GandrGroupMessages = make(map[[32]byte][]gandr.PrivateGroupMessage)
 		a.GandrContacts, _ = m.session.Contacts()
-		if a.GandrMessages == nil {
-			a.GandrMessages = make(map[[32]byte][]gandr.Message)
+		a.GandrMessages = make(map[[32]byte][]gandr.Message)
+		for _, channel := range m.channels {
+			history, err := m.session.Messages(channel.ID, 200)
+			if err != nil {
+				continue
+			}
+			for _, item := range history {
+				a.GandrMessages[channel.ID] = append(a.GandrMessages[channel.ID], gandr.Message{
+					Hash: item.Hash, ChannelID: item.ChannelID, Sender: item.Sender,
+					Content: item.Content, At: item.At, Local: item.Local,
+				})
+			}
 		}
 		if m.session.Online() {
 			a.Status = fmt.Sprintf("GANDR · nätverk ansluten · %d kanaler", len(m.channels))
 		} else {
 			a.Status = fmt.Sprintf("GANDR · lokal runtime · %d kanaler", len(m.channels))
 		}
-		return a, waitGandrIncoming(m.session)
+		return a, tea.Batch(waitGandrIncoming(m.session), refreshGandrPeers(m.session))
 	case gandrIncomingMsg:
+		if a.GandrSession != nil {
+			_ = a.GandrSession.SaveMessage(gandr.ChatMessage{
+				Hash: m.message.Hash, ChannelID: m.message.ChannelID,
+				Sender: m.message.Sender, Content: m.message.Content,
+				At: m.message.At,
+			})
+		}
 		if a.GandrMessages == nil {
 			a.GandrMessages = make(map[[32]byte][]gandr.Message)
 		}
-		a.GandrMessages[m.message.ChannelID] = append(a.GandrMessages[m.message.ChannelID], m.message)
+		appendGandrMessage(a.GandrMessages, m.message)
 		if a.GandrSession != nil {
 			return a, waitGandrIncoming(a.GandrSession)
+		}
+	case gandrPeerTickMsg:
+		if a.GandrSession != nil && a.GandrSession.Online() {
+			return a, loadGandrPeers(a.GandrSession)
+		}
+	case gandrPeersMsg:
+		if m.err == nil {
+			a.GandrPeers = m.peers
+		}
+		if a.GandrSession != nil && a.GandrSession.Online() {
+			return a, refreshGandrPeers(a.GandrSession)
+		}
+	case gandrContactMsg:
+		if m.err != nil {
+			a.Status = "GANDR · användaren kunde inte läggas till · " + m.err.Error()
+		} else if a.GandrSession != nil {
+			a.GandrContacts, _ = a.GandrSession.Contacts()
+			a.GandrAddMode = false
+			a.Status = "GANDR · användaren sparad lokalt"
+		}
+	case gandrGroupMsg:
+		if m.err != nil {
+			a.Status = "GANDR · privat grupp · " + m.err.Error()
+		} else {
+			a.GandrGroups = m.groups
+			a.GandrActiveGroup = m.active
+			if m.active != nil {
+				if a.GandrGroupMessages == nil {
+					a.GandrGroupMessages = make(map[[32]byte][]gandr.PrivateGroupMessage)
+				}
+				a.GandrGroupMessages[*m.active] = m.messages
+			}
+			a.Status = "GANDR · privat grupp · krypterad lokalt"
 		}
 	case gandrChannelsMsg:
 		if m.err != nil {
@@ -319,6 +397,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.Status = "GANDR · kontakt blockerad lokalt"
 		}
+	case gandrDeleteMsg:
+		if m.err != nil {
+			a.Status = "GANDR · radering misslyckades · " + m.err.Error()
+		} else {
+			a.GandrDeleteConfirm = false
+			if a.GandrRecreate {
+				a.GandrRecreate = false
+				a.GandrCreating = true
+				a.GandrConfirming = false
+				a.Input.EchoMode = textinput.EchoPassword
+				a.Input.Placeholder = "Nytt GANDR-lösenord"
+				a.Input.Focus()
+				a.Status = "GANDR · gamla valvet raderat · skapa nytt valv"
+			} else {
+				a.Status = "GANDR · valv och privata data raderade"
+			}
+		}
 	case meshTickMsg:
 		if a.MeshRuntime == nil {
 			return a, nil
@@ -328,12 +423,36 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, meshTick()
 	case tea.KeyMsg:
 		if a.Input.Focused() {
+			// A forgotten password must not make the destructive reset
+			// unreachable. Ctrl+X bypasses the password field, but still
+			// requires the exact RADERA confirmation below.
+			if m.String() == "ctrl+x" && a.CurrentView == ViewGandr && a.Gandr != nil && a.Gandr.HasVault() {
+				beginGandrDelete(&a, false)
+				return a, nil
+			}
+			// Escape leaves the password field so destructive vault actions
+			// cannot be triggered accidentally while typing a password.
+			if m.String() == "esc" {
+				a.Input.Blur()
+				a.Input.SetValue("")
+				return a, nil
+			}
 			if m.String() == "enter" {
 				raw := a.Input.Value()
 				q := strings.TrimSpace(raw)
 				a.Input.Blur()
 				if a.CurrentView == ViewGandr {
 					a.Input.SetValue("")
+					if a.GandrDeleteConfirm {
+						if q != "RADERA" {
+							a.Status = "GANDR · radering avbruten"
+							return a, nil
+						}
+						a.Input.Blur()
+						a.GandrDeleteConfirm = false
+						closeGandrSession(&a)
+						return a, deleteGandr(a.Gandr)
+					}
 					if time.Now().Before(a.GandrLockedUntil) {
 						a.Status = fmt.Sprintf("GANDR · upplåsning pausad · %s kvar", time.Until(a.GandrLockedUntil).Round(time.Second))
 						a.Input.Blur()
@@ -367,8 +486,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return a, unlockGandr(a.Gandr, raw)
 				}
 				if a.CurrentView == ViewGandrChat {
+					if a.GandrAddMode || strings.HasPrefix(q, "/add ") {
+						a.GandrAddMode = false
+						return a, addGandrContact(a.GandrSession, strings.TrimSpace(strings.TrimPrefix(q, "/add ")))
+					}
 					if q == "" || a.GandrSession == nil {
 						return a, nil
+					}
+					if strings.HasPrefix(q, "/grupp") {
+						return a, gandrGroupCommand(a.GandrSession, q)
 					}
 					if strings.HasPrefix(q, "/join ") {
 						return a, gandrJoin(a.GandrSession, strings.TrimSpace(strings.TrimPrefix(q, "/join ")))
@@ -377,10 +503,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						channel := a.GandrChannels[min(a.Cursor, len(a.GandrChannels)-1)]
 						return a, gandrLeave(a.GandrSession, channel.ID)
 					}
+					if a.GandrActiveGroup != nil {
+						return a, sendPrivateGandrGroup(a.GandrSession, *a.GandrActiveGroup, q)
+					}
 					if len(a.GandrChannels) > 0 {
 						channel := a.GandrChannels[min(a.Cursor, len(a.GandrChannels)-1)]
-						own := gandr.Message{ChannelID: channel.ID, Content: q, At: time.Now().UnixNano()}
-						a.GandrMessages[channel.ID] = append(a.GandrMessages[channel.ID], own)
+						own := gandr.Message{ChannelID: channel.ID, Content: q, At: time.Now().UnixNano(), Local: true}
+						appendGandrMessage(a.GandrMessages, own)
 						return a, gandrSend(a.GandrSession, channel.ID, q)
 					}
 					return a, nil
@@ -398,6 +527,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.Input.Blur()
 				a.Input.SetValue("")
 				a.GandrCreating, a.GandrConfirming, a.GandrPassphrase = false, false, ""
+				a.GandrAddMode = false
 				return a, nil
 			}
 			var cmd tea.Cmd
@@ -456,6 +586,24 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.Input.Focus()
 			}
 			return a, nil
+		case "n":
+			if a.CurrentView == ViewGandr && a.Gandr != nil && a.Gandr.HasVault() {
+				closeGandrSession(&a)
+				a.GandrRecreate = true
+				a.GandrDeleteConfirm = true
+				a.Input.SetValue("")
+				a.Input.EchoMode = textinput.EchoNormal
+				a.Input.Placeholder = "Skriv RADERA för att skapa nytt valv"
+				a.Input.Focus()
+				return a, nil
+			}
+			return a, nil
+		case "d":
+			if a.CurrentView == ViewGandr && a.Gandr != nil && a.Gandr.HasVault() {
+				beginGandrDelete(&a, false)
+				return a, nil
+			}
+			return a, nil
 		case "b":
 			if a.CurrentView == ViewGandrChat {
 				return a, nil
@@ -471,8 +619,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			a.move(-1)
 		case "x":
+			if a.CurrentView == ViewGandr && a.Gandr != nil && a.Gandr.HasVault() {
+				beginGandrDelete(&a, false)
+				return a, nil
+			}
 			if a.CurrentView == ViewGandrChat {
 				return a, blockSelectedGandr(a)
+			}
+		case "a":
+			if a.CurrentView == ViewGandrChat && a.GandrSession != nil {
+				a.GandrAddMode = true
+				a.Input.SetValue("")
+				a.Input.EchoMode = textinput.EchoNormal
+				a.Input.Placeholder = "publik nyckel + namn"
+				a.Input.Focus()
+				return a, nil
 			}
 		case "/":
 			if a.CurrentView == ViewGandrChat {
@@ -540,9 +701,38 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.Cursor = m.Y - 6
 				return a, nil
 			}
-			if a.Width >= 100 && m.X >= a.Width-24 && m.Y >= 6 && m.Y < 6+len(a.GandrContacts) {
-				a.GandrRightCursor = m.Y - 6
+			if m.X < 26 && m.Y == 9+len(a.GandrChannels) && a.GandrSession != nil {
+				a.Input.SetValue("/join ")
+				a.Input.EchoMode = textinput.EchoNormal
+				a.Input.Placeholder = "KANALNAMN"
+				a.Input.Focus()
 				return a, nil
+			}
+			if m.X < 26 && m.Y == 10+len(a.GandrChannels) && a.GandrSession != nil {
+				a.Input.SetValue("/grupp skapa ")
+				a.Input.EchoMode = textinput.EchoNormal
+				a.Input.Placeholder = "NAMN LÖSENORD"
+				a.Input.Focus()
+				return a, nil
+			}
+			if m.X < 26 && m.Y == 11+len(a.GandrChannels) && a.Gandr != nil && a.Gandr.HasVault() {
+				beginGandrDelete(&a, false)
+				return a, nil
+			}
+			if a.Width >= 100 && m.X >= a.Width-30 && m.Y >= 6 {
+				contactIndex := (m.Y - 6) / 2
+				if contactIndex >= 0 && contactIndex < len(a.GandrContacts) {
+					a.GandrRightCursor = contactIndex
+					return a, nil
+				}
+				if a.GandrSession != nil {
+					a.GandrAddMode = true
+					a.Input.SetValue("")
+					a.Input.EchoMode = textinput.EchoNormal
+					a.Input.Placeholder = "publik nyckel + namn"
+					a.Input.Focus()
+					return a, nil
+				}
 			}
 			if m.Y >= 6+len(a.GandrChannels) && a.GandrSession != nil {
 				a.Input.EchoMode = textinput.EchoNormal
@@ -552,6 +742,24 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return a, nil
+}
+
+func beginGandrDelete(a *App, recreate bool) {
+	if a == nil {
+		return
+	}
+	closeGandrSession(a)
+	a.CurrentView = ViewGandr
+	a.GandrRecreate = recreate
+	a.GandrDeleteConfirm = true
+	a.Input.SetValue("")
+	a.Input.EchoMode = textinput.EchoNormal
+	if recreate {
+		a.Input.Placeholder = "Skriv RADERA för att skapa nytt valv"
+	} else {
+		a.Input.Placeholder = "Skriv RADERA för att bekräfta"
+	}
+	a.Input.Focus()
 }
 
 func (a *App) move(delta int) {
@@ -696,7 +904,10 @@ func (a App) View() string {
 		}
 		switch summary.State {
 		case gandr.Locked:
-			b.WriteString("\n\nLösenordsruta aktiv. Tryck Enter för att låsa upp eller Esc för att gå tillbaka.")
+			b.WriteString("\n\nLösenordsruta aktiv. Tryck Enter för att låsa upp.")
+			if a.Gandr != nil && a.Gandr.HasVault() {
+				b.WriteString("\nGlömt lösenord? Tryck Ctrl+X och skriv RADERA för att radera valvet.")
+			}
 		case gandr.Missing:
 			if a.GandrCreating {
 				if a.GandrConfirming {
@@ -719,6 +930,15 @@ func (a App) View() string {
 				b.WriteString("\nGANDR-daemon är inte ansluten ännu.")
 			}
 		}
+		if a.GandrDeleteConfirm {
+			if a.GandrRecreate {
+				b.WriteString("\n\n" + critical.Render("VARNING: gamla GANDR-identiteten och client.db raderas."))
+				b.WriteString("\nDet går inte att återställa ett bortglömt lösenord. Skriv RADERA för nytt valv.")
+			} else {
+				b.WriteString("\n\n" + critical.Render("VARNING: detta raderar GANDR-identiteten och den privata client.db."))
+				b.WriteString("\nSkriv RADERA och tryck Enter för att fortsätta.")
+			}
+		}
 		b.WriteString("\n\n" + muted.Render("Gandr-identitet, privat databas och petnames hålls separerade från BACKFLASH."))
 	case ViewGandrChat:
 		b.WriteString(renderGandrChat(a))
@@ -730,7 +950,7 @@ func (a App) View() string {
 		b.WriteString("\n\n" + muted.Render(a.Status))
 	}
 	if a.CurrentView == ViewGandr || a.CurrentView == ViewGandrChat {
-		b.WriteString("\n\n" + muted.Render("j/k flytta · Enter öppna · / kommando · q tillbaka"))
+		b.WriteString("\n\n" + muted.Render("j/k flytta · Enter öppna · / kommando · Esc lämna fält · x radera valv · n radera + skapa nytt · q tillbaka"))
 	} else {
 		b.WriteString("\n\n" + muted.Render("j/k flytta · Enter öppna · ") + accent.Render("f") + muted.Render(" forum · ") + accent.Render("/") + muted.Render(" fjärrsök · ") + accent.Render("Ctrl+F") + muted.Render(" lokalt · ") + accent.Render("p") + muted.Render(" polis · ") + accent.Render("m") + muted.Render(" mesh · ") + accent.Render("g") + muted.Render(" Gandr · ") + accent.Render("h") + muted.Render(" hem · q tillbaka/avsluta"))
 	}
@@ -770,9 +990,50 @@ func renderGandrChat(a App) string {
 	}
 	sidebar.WriteString("\n" + muted.Render("/join namn"))
 	sidebar.WriteString("\n" + muted.Render("/leave"))
+	sidebar.WriteString("\n" + accent.Render("+ skapa kanal"))
+	sidebar.WriteString("\n" + accent.Render("+ skapa privat grupp"))
+	if a.Gandr != nil && a.Gandr.HasVault() {
+		sidebar.WriteString("\n" + critical.Render("[!] radera GANDR-valv"))
+	}
+	if len(a.GandrGroups) > 0 {
+		sidebar.WriteString("\n\n" + sectionStyle.Render("PRIVATA GRUPPER"))
+		for _, group := range a.GandrGroups {
+			marker := "🔒"
+			if a.GandrActiveGroup != nil && *a.GandrActiveGroup == group.ID {
+				marker = "›"
+			}
+			sidebar.WriteString("\n" + marker + " " + truncate(group.Name, sidebarWidth-5))
+		}
+		sidebar.WriteString("\n" + muted.Render("/grupp lista"))
+	}
 
 	var main strings.Builder
-	if len(a.GandrChannels) == 0 {
+	if a.GandrActiveGroup != nil {
+		groupName := fmt.Sprintf("~%x", a.GandrActiveGroup[:4])
+		for _, group := range a.GandrGroups {
+			if group.ID == *a.GandrActiveGroup {
+				groupName = group.Name
+				break
+			}
+		}
+		main.WriteString(sectionStyle.Render("🔒 " + groupName))
+		main.WriteString("  " + online.Render("● E2E-KRYPTERAD"))
+		main.WriteString("\n" + metadata.Render(strings.Repeat("─", max(1, mainWidth-2))) + "\n")
+		messages := a.GandrGroupMessages[*a.GandrActiveGroup]
+		if len(messages) == 0 {
+			main.WriteString(muted.Render("Inga privata meddelanden ännu."))
+		} else {
+			start := 0
+			if len(messages) > 18 {
+				start = len(messages) - 18
+			}
+			for _, message := range messages[start:] {
+				sender := fmt.Sprintf("~%x", message.Sender[:4])
+				stamp := time.Unix(0, message.At).Local().Format("15:04")
+				main.WriteString(metadata.Render(stamp) + " " + accent.Render(fmt.Sprintf("%-8s", sender)) + " " + message.Content + "\n")
+			}
+		}
+	} else if len(a.GandrChannels) == 0 {
 		main.WriteString(sectionStyle.Render("MEDDELANDEN"))
 		main.WriteString("\n\n" + warning.Render("Ingen kanal vald."))
 		main.WriteString("\n" + muted.Render("Tryck Enter för skrivfältet och skriv /join kanal."))
@@ -795,7 +1056,7 @@ func renderGandrChat(a App) string {
 			}
 			for _, message := range messages[start:] {
 				sender := fmt.Sprintf("~%x", message.Sender[:4])
-				if message.Sender == ([32]byte{}) {
+				if message.Local || message.Sender == ([32]byte{}) {
 					sender = "du"
 				}
 				stamp := time.Unix(0, message.At).Local().Format("15:04")
@@ -804,33 +1065,60 @@ func renderGandrChat(a App) string {
 		}
 	}
 
-	left := lipgloss.NewStyle().Width(sidebarWidth).PaddingRight(1).Render(sidebar.String())
-	mainView := lipgloss.NewStyle().Width(mainWidth).Render(main.String())
+	left := gandrPanel(sidebar.String(), sidebarWidth)
+	mainView := gandrPanel(main.String(), mainWidth)
 	if width >= 100 {
-		memberWidth := 22
+		memberWidth := 28
 		var members strings.Builder
-		members.WriteString(sectionStyle.Render("MEDLEMMAR"))
-		members.WriteString("\n" + metadata.Render("──────────────────") + "\n")
+		members.WriteString(sectionStyle.Render("ANVÄNDARE"))
+		members.WriteString("\n" + metadata.Render("────────────────────────") + "\n")
 		if len(a.GandrContacts) == 0 {
-			members.WriteString(muted.Render("inga kontakter"))
+			members.WriteString(muted.Render("inga sparade användare"))
 		} else {
 			for i, contact := range a.GandrContacts {
 				name := contact.Name
 				if name == "" {
 					name = fmt.Sprintf("~%x", contact.Pubkey[:4])
 				}
-				line := truncate(name, memberWidth-2)
+				marker := "○"
+				presence := "EJ PÅ MESH"
+				if gandrPeerOnline(a.GandrPeers, contact.Pubkey) {
+					marker = "●"
+					presence = "PÅ MESH"
+				}
+				line := marker + " " + truncate(name, memberWidth-4)
 				if i == a.GandrRightCursor {
 					line = selected.Render("› " + line)
 				}
 				members.WriteString(line + "\n")
+				if gandrPeerOnline(a.GandrPeers, contact.Pubkey) {
+					members.WriteString(online.Render("  "+presence) + "\n")
+				} else {
+					members.WriteString(muted.Render("  "+presence) + "\n")
+				}
 			}
 		}
-		members.WriteString("\n" + muted.Render("x blockera"))
-		memberView := lipgloss.NewStyle().Width(memberWidth).PaddingLeft(1).Render(members.String())
-		return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, "│ ", mainView, "│ ", memberView) + "\n\n" + muted.Render("j/k kanal · ↑/↓ medlem · Enter skriv · /join · /leave · x blockera · q tillbaka")
+		members.WriteString("\n" + muted.Render("a lägg till · x blockera"))
+		memberView := gandrPanel(members.String(), memberWidth)
+		return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView, memberView) + "\n\n" + muted.Render("j/k kanal · ↑/↓ användare · Enter skriv · a lägg till · /grupp skapa|öppna · x blockera · q tillbaka")
 	}
-	return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, "│ ", mainView) + "\n\n" + muted.Render("j/k kanal · Enter skriv · /join · /leave · q tillbaka")
+	return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView) + "\n\n" + muted.Render("j/k kanal · Enter skriv · a lägg till · /grupp lista · q tillbaka")
+}
+
+func gandrPanel(content string, width int) string {
+	if width < 1 {
+		return content
+	}
+	return lipgloss.NewStyle().Width(width).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("238")).Padding(0, 1).Render(content)
+}
+
+func gandrPeerOnline(peers []gandr.Peer, identity [32]byte) bool {
+	for _, peer := range peers {
+		if peer.Identity == identity {
+			return true
+		}
+	}
+	return false
 }
 
 func (a App) breadcrumb() string {
@@ -1084,7 +1372,8 @@ func renderDashboard(a App) string {
 			renderPanel("HETAST JUST NU", hotLines(d.HotThreads), columnWidth),
 			renderPanel("CACHE-MESH", []string{
 				fmt.Sprintf("Yggdrasil   %s", d.Mesh),
-				fmt.Sprintf("Peers       %d", d.MeshPeers),
+				fmt.Sprintf("Noder       %d", d.MeshPeers+1),
+				fmt.Sprintf("Fjärrpeers  %d", d.MeshPeers),
 				fmt.Sprintf("Delning     %s", d.MeshSharing),
 				fmt.Sprintf("Objekt      %d", d.MeshObjects),
 				fmt.Sprintf("RX/TX       %s / %s", bytesUint(d.MeshRX), bytesUint(d.MeshTX)),
@@ -1104,13 +1393,13 @@ func renderDashboard(a App) string {
 	} else if width >= 80 {
 		b.WriteString(fmt.Sprintf("LOKAL DATA\nForum %s · Trådar %s · Inlägg %s · DB %s\n\n", number(d.ForumCount), number(d.ThreadCount), number(d.PostCount), bytes(d.DBSize)))
 		b.WriteString(fmt.Sprintf("AKTIVITET\nInlägg / 60m %s · Aktiva trådar %s · Nya trådar %s\n\n", number(d.PostsLastHour), number(d.ActiveThreads), number(d.NewThreads)))
-		b.WriteString(fmt.Sprintf("STATUS\nDB REDO · Nätverk %s · Session %s · Synk %s\n\nCACHE-MESH %s · peers %d · delning %s · GANDR ᚷ %s\n", d.Network, d.Session, d.Sync, d.Mesh, d.MeshPeers, d.MeshSharing, d.Gandr))
+		b.WriteString(fmt.Sprintf("STATUS\nDB REDO · Nätverk %s · Session %s · Synk %s\n\nCACHE-MESH %s · noder %d · fjärrpeers %d · delning %s · GANDR ᚷ %s\n", d.Network, d.Session, d.Sync, d.Mesh, d.MeshPeers+1, d.MeshPeers, d.MeshSharing, d.Gandr))
 		b.WriteString("POLISHÄNDELSER\n" + renderEventSummary(a.Events))
 	} else {
 		b.WriteString("DATA\n")
 		b.WriteString(fmt.Sprintf("%s forum\n%s trådar\n%s inlägg\n\n", number(d.ForumCount), number(d.ThreadCount), number(d.PostCount)))
 		b.WriteString("AKTIVITET\n" + number(d.PostsLastHour) + " / 60m\n\n")
-		b.WriteString("MESH " + d.Mesh + "\npeers " + number(d.MeshPeers) + " · objekt " + number(d.MeshObjects) + "\nGANDR ᚷ " + d.Gandr)
+		b.WriteString("MESH " + d.Mesh + "\nnoder " + number(d.MeshPeers+1) + " · fjärrpeers " + number(d.MeshPeers) + " · objekt " + number(d.MeshObjects) + "\nGANDR ᚷ " + d.Gandr)
 	}
 	b.WriteString("\n\n" + muted.Render("[f] Forum  [/] Sök  [p] Polis  [m] Mesh  [g] Gandr  [h] Hem"))
 	return b.String()
@@ -1319,8 +1608,29 @@ func connectGandr(subsystem *gandr.Subsystem) tea.Cmd {
 				return gandrSessionMsg{err: err}
 			}
 		}
-		return gandrSessionMsg{session: session, channels: channels}
+		peers, _ := session.Peers(ctx)
+		groups, _ := session.PrivateGroups()
+		return gandrSessionMsg{session: session, channels: channels, peers: peers, groups: groups}
 	}
+}
+
+func loadGandrPeers(session *gandr.Session) tea.Cmd {
+	return func() tea.Msg {
+		if session == nil || !session.Online() {
+			return gandrPeersMsg{}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		peers, err := session.Peers(ctx)
+		return gandrPeersMsg{peers: peers, err: err}
+	}
+}
+
+func refreshGandrPeers(session *gandr.Session) tea.Cmd {
+	if session == nil || !session.Online() {
+		return nil
+	}
+	return tea.Tick(10*time.Second, func(time.Time) tea.Msg { return gandrPeerTickMsg{} })
 }
 
 func waitGandrIncoming(session *gandr.Session) tea.Cmd {
@@ -1377,6 +1687,101 @@ func gandrSend(session *gandr.Session, id [32]byte, content string) tea.Cmd {
 	}
 }
 
+func addGandrContact(session *gandr.Session, value string) tea.Cmd {
+	return func() tea.Msg {
+		if session == nil {
+			return gandrContactMsg{err: fmt.Errorf("GANDR-sessionen är inte aktiv")}
+		}
+		value = strings.TrimSpace(value)
+		parts := strings.Fields(value)
+		if len(parts) < 2 {
+			return gandrContactMsg{err: fmt.Errorf("använd: /add PUBLIK_NYCKEL NAMN")}
+		}
+		decoded, err := hex.DecodeString(parts[0])
+		if err != nil || len(decoded) != 32 {
+			return gandrContactMsg{err: fmt.Errorf("publik nyckel ska vara 64 hextecken")}
+		}
+		var pubkey [32]byte
+		copy(pubkey[:], decoded)
+		name := strings.TrimSpace(strings.TrimPrefix(value, parts[0]))
+		if name == "" {
+			return gandrContactMsg{err: fmt.Errorf("namn saknas")}
+		}
+		return gandrContactMsg{err: session.AddContact(pubkey, name, "")}
+	}
+}
+
+func gandrGroupCommand(session *gandr.Session, command string) tea.Cmd {
+	return func() tea.Msg {
+		parts := strings.Fields(command)
+		if len(parts) < 2 {
+			return gandrGroupMsg{err: fmt.Errorf("använd: /grupp skapa, /grupp öppna eller /grupp lista")}
+		}
+		switch parts[1] {
+		case "lista":
+			groups, err := session.PrivateGroups()
+			return gandrGroupMsg{groups: groups, err: err}
+		case "skapa":
+			if len(parts) < 4 {
+				return gandrGroupMsg{err: fmt.Errorf("använd: /grupp skapa NAMN LÖSENORD")}
+			}
+			name := strings.Join(parts[2:len(parts)-1], " ")
+			group, err := session.CreatePrivateGroup(name, parts[len(parts)-1])
+			if err != nil {
+				return gandrGroupMsg{err: err}
+			}
+			groups, _ := session.PrivateGroups()
+			return gandrGroupMsg{groups: groups, active: &group.ID}
+		case "öppna":
+			if len(parts) != 4 {
+				return gandrGroupMsg{err: fmt.Errorf("använd: /grupp öppna ID LÖSENORD")}
+			}
+			decoded, err := hex.DecodeString(parts[2])
+			if err != nil || len(decoded) != 32 {
+				return gandrGroupMsg{err: fmt.Errorf("grupp-ID ska vara 64 hextecken")}
+			}
+			var id [32]byte
+			copy(id[:], decoded)
+			if err := session.UnlockPrivateGroup(id, parts[3]); err != nil {
+				return gandrGroupMsg{err: err}
+			}
+			messages, err := session.PrivateGroupMessages(id, 200)
+			groups, _ := session.PrivateGroups()
+			return gandrGroupMsg{groups: groups, active: &id, messages: messages, err: err}
+		case "stäng":
+			groups, err := session.PrivateGroups()
+			return gandrGroupMsg{groups: groups, err: err}
+		default:
+			return gandrGroupMsg{err: fmt.Errorf("okänt gruppkommando")}
+		}
+	}
+}
+
+func sendPrivateGandrGroup(session *gandr.Session, id [32]byte, content string) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := session.SendPrivateGroup(id, content); err != nil {
+			return gandrGroupMsg{err: err}
+		}
+		messages, err := session.PrivateGroupMessages(id, 200)
+		groups, _ := session.PrivateGroups()
+		return gandrGroupMsg{groups: groups, active: &id, messages: messages, err: err}
+	}
+}
+
+func appendGandrMessage(messages map[[32]byte][]gandr.Message, message gandr.Message) {
+	if messages == nil {
+		return
+	}
+	if message.Hash != ([32]byte{}) {
+		for _, existing := range messages[message.ChannelID] {
+			if existing.Hash == message.Hash {
+				return
+			}
+		}
+	}
+	messages[message.ChannelID] = append(messages[message.ChannelID], message)
+}
+
 func blockSelectedGandr(a App) tea.Cmd {
 	if a.GandrSession == nil || len(a.GandrContacts) == 0 {
 		return func() tea.Msg { return gandrStatusMsg{err: fmt.Errorf("ingen kontakt vald")} }
@@ -1396,6 +1801,10 @@ func closeGandrSession(a *App) {
 	a.GandrChannels = nil
 	a.GandrMessages = nil
 	a.GandrContacts = nil
+	a.GandrPeers = nil
+	a.GandrGroups = nil
+	a.GandrActiveGroup = nil
+	a.GandrGroupMessages = nil
 }
 
 func createGandr(subsystem *gandr.Subsystem, passphrase string) tea.Cmd {
@@ -1405,6 +1814,15 @@ func createGandr(subsystem *gandr.Subsystem, passphrase string) tea.Cmd {
 		}
 		err := subsystem.Create(passphrase)
 		return gandrMsg{summary: subsystem.Summary(), err: err, created: true}
+	}
+}
+
+func deleteGandr(subsystem *gandr.Subsystem) tea.Cmd {
+	return func() tea.Msg {
+		if subsystem == nil {
+			return gandrDeleteMsg{err: fmt.Errorf("GANDR-gränsen saknas")}
+		}
+		return gandrDeleteMsg{err: subsystem.DeleteVault()}
 	}
 }
 
@@ -1447,7 +1865,7 @@ func renderMeshDetail(snapshot meshruntime.Snapshot) string {
 	b.WriteString("\n\nSTATUS      " + meshStateLabel(snapshot.State))
 	b.WriteString("\nDELNING     " + map[bool]string{true: "PÅ", false: "AV"}[snapshot.ShareCache])
 	b.WriteString("\nIDENTITET   " + snapshot.Identity)
-	b.WriteString(fmt.Sprintf("\nPEERS       %d\nOBJEKT      %d", snapshot.Peers, snapshot.Objects))
+	b.WriteString(fmt.Sprintf("\nNODER       %d\nFJÄRRPEERS  %d\nOBJEKT      %d", snapshot.Peers+1, snapshot.Peers, snapshot.Objects))
 	if snapshot.LastError != "" {
 		b.WriteString("\nFEL         " + snapshot.LastError)
 	}

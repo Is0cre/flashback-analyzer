@@ -8,6 +8,18 @@ lokal cache, sökning, trådanalys och en återhållsam diskursövervakning för
 nattpasset. ASCII-logotypen och den bakfulla terminalhunden är egna
 identitetselement; BACKFLASH är inte en officiell Flashback-klient.
 
+## Go-klienten
+
+En Go-port byggs parallellt som den framtida distribuerbara klienten. Den
+använder Bubble Tea, SQLite och Flashbacks strukturella HTML-adapter. Python
+versionen ligger kvar som referens tills Go-klienten nått första
+funktionsparitet.
+
+```bash
+go run ./cmd/backflash
+go run ./cmd/backflash version
+```
+
 Read-only grund för att samla in och analysera Flashback-trådar utan att blanda ihop citerad text med nya påståenden.
 
 ## Vad v0.1 gör

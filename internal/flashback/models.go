@@ -13,14 +13,14 @@ const (
 )
 
 type ForumNode struct {
-	ID         string
-	Title      string
-	URL        string
-	ParentID   string
-	Depth      int
-	SortOrder  int
+	ID          string
+	Title       string
+	URL         string
+	ParentID    string
+	Depth       int
+	SortOrder   int
 	HasChildren bool
-	Browsable  bool
+	Browsable   bool
 }
 
 type ThreadSummary struct {
@@ -50,29 +50,29 @@ type SearchResult struct {
 }
 
 type Quote struct {
-	PostID   string
-	Author   string
-	Text     string
+	PostID string
+	Author string
+	Text   string
 }
 
 type Post struct {
-	ID         string
-	ThreadID   string
-	Author     string
-	Timestamp  time.Time
-	Page       int
-	Position   int
-	Text       string
-	RawText    string
-	SourceURL  string
-	Quotes     []Quote
+	ID        string
+	ThreadID  string
+	Author    string
+	Timestamp time.Time
+	Page      int
+	Position  int
+	Text      string
+	RawText   string
+	SourceURL string
+	Quotes    []Quote
 }
 
 type ParsedPage struct {
-	ThreadID string
-	Title    string
-	Page     int
-	MaxPage  int
+	ThreadID  string
+	Title     string
+	Page      int
+	MaxPage   int
 	SourceURL string
-	Posts    []Post
+	Posts     []Post
 }

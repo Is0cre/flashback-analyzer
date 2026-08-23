@@ -42,14 +42,14 @@ func main() {
 	model := tui.New(s, c)
 	appDone()
 	program := tea.NewProgram(model, tea.WithAltScreen())
-	model, err := program.Run()
-	if app, ok := model.(tui.App); ok {
+	finalModel, runErr := program.Run()
+	if app, ok := finalModel.(tui.App); ok {
 		if shutdownErr := app.Shutdown(); shutdownErr != nil {
 			fmt.Fprintln(os.Stderr, "Mesh kunde inte stängas rent:", shutdownErr)
 		}
 	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "BACKFLASH avslutades med fel:", err)
+	if runErr != nil {
+		fmt.Fprintln(os.Stderr, "BACKFLASH avslutades med fel:", runErr)
 		os.Exit(1)
 	}
 }

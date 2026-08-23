@@ -285,7 +285,7 @@ func (n *Node) Prepare(cache *mesh.Node) {
 // Serve reads public cache requests until the transport closes. It is meant
 // for an opt-in cache node and performs no peer/user identity logging.
 func (n *Node) Serve(ctx context.Context, cache *mesh.Node) error {
-	if n == nil || n.core == nil || cache == nil {
+	if n == nil || n.core == nil {
 		return errors.New("Yggdrasil-cache-node saknar state")
 	}
 	n.startLoop(cache)

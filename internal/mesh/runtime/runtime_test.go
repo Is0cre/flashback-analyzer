@@ -71,6 +71,9 @@ func TestTwoRuntimeNodesTransferAndReadAfterPeerStops(t *testing.T) {
 	}
 	defer b.Stop()
 	waitFor(t, 10*time.Second, func() bool { return b.Snapshot().Peers > 0 })
+	if snapshot := b.Snapshot(); snapshot.State == Error {
+		t.Fatalf("B gick till ERROR före hämtning: %+v", snapshot)
+	}
 	fetched, err := b.GetContext(context.Background(), object.HashString())
 	if err != nil {
 		t.Fatal(err)

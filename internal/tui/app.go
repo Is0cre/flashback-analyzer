@@ -656,7 +656,7 @@ func loadForum(s *store.Store, c *flashback.Client, n flashback.ForumNode) tea.C
 	return func() tea.Msg {
 		finish := diagnostics.Start("forum.threads")
 		defer finish()
-		dbRows, e := s.DB.Query(`SELECT t.id,t.title,t.url,t.replies,t.views,t.last_post_at,t.last_post_author,t.sticky,t.page_count FROM forum_threads ft JOIN threads t ON t.id=ft.thread_id WHERE ft.forum_id=? AND trim(t.title)<>'' ORDER BY ft.position`, n.ID)
+		dbRows, e := s.DB.Query(`SELECT t.id,t.title,t.url,t.replies,t.views,t.last_post_at,t.last_post_author,t.sticky,t.page_count FROM forum_threads ft JOIN threads t ON t.id=ft.thread_id WHERE ft.forum_id=? AND trim(t.title)<>'' AND lower(trim(t.title)) NOT LIKE 'utan titel%' ORDER BY ft.position`, n.ID)
 		if e == nil {
 			defer dbRows.Close()
 			var out []flashback.ThreadSummary

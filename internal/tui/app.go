@@ -147,6 +147,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "forums":
 			a.Forums, a.CurrentView = m.forums, ViewForums
 			if m.refresh {
+				a.Status = "FORUM · UPPDATERAR…"
 				target := m.refreshURL
 				if target == "" {
 					target = flashback.BaseURL

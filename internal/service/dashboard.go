@@ -51,27 +51,20 @@ func (s *DashboardService) Snapshot(ctx context.Context) (DashboardSnapshot, err
 	}
 	cutoff := now.Add(-time.Hour).Format(time.RFC3339Nano)
 	var out DashboardSnapshot
-	for _, q := range []struct {
-		dst *int
-		sql string
-	}{
-		{&out.ForumCount, `SELECT COUNT(*) FROM forums`},
-		{&out.ThreadCount, `SELECT COUNT(*) FROM threads`},
-		{&out.PostCount, `SELECT COUNT(*) FROM posts`},
-		{&out.PostsLastHour, `SELECT COUNT(*) FROM posts WHERE timestamp >= ?`},
-		{&out.ActiveThreads, `SELECT COUNT(DISTINCT thread_id) FROM posts WHERE timestamp >= ?`},
-		{&out.ActiveForums, `SELECT COUNT(DISTINCT ft.forum_id) FROM posts p JOIN forum_threads ft ON ft.thread_id=p.thread_id WHERE p.timestamp >= ?`},
-		{&out.NewThreads, `SELECT COUNT(*) FROM threads WHERE last_seen_at >= ?`},
-	} {
-		var err error
-		if q.sql == `SELECT COUNT(*) FROM posts WHERE timestamp >= ?` || q.sql == `SELECT COUNT(DISTINCT thread_id) FROM posts WHERE timestamp >= ?` || q.sql == `SELECT COUNT(DISTINCT ft.forum_id) FROM posts p JOIN forum_threads ft ON ft.thread_id=p.thread_id WHERE p.timestamp >= ?` || q.sql == `SELECT COUNT(*) FROM threads WHERE last_seen_at >= ?` {
-			err = s.Store.DB.QueryRowContext(ctx, q.sql, cutoff).Scan(q.dst)
-		} else {
-			err = s.Store.DB.QueryRowContext(ctx, q.sql).Scan(q.dst)
-		}
-		if err != nil {
-			return DashboardSnapshot{}, err
-		}
+	const aggregateQuery = `
+SELECT
+  (SELECT COUNT(*) FROM forums),
+  (SELECT COUNT(*) FROM threads),
+  (SELECT COUNT(*) FROM posts),
+  (SELECT COUNT(*) FROM posts WHERE timestamp >= ?),
+  (SELECT COUNT(DISTINCT thread_id) FROM posts WHERE timestamp >= ?),
+  (SELECT COUNT(DISTINCT ft.forum_id) FROM posts p JOIN forum_threads ft ON ft.thread_id=p.thread_id WHERE p.timestamp >= ?),
+  (SELECT COUNT(*) FROM threads WHERE last_seen_at >= ?)`
+	if err := s.Store.DB.QueryRowContext(ctx, aggregateQuery, cutoff, cutoff, cutoff, cutoff).Scan(
+		&out.ForumCount, &out.ThreadCount, &out.PostCount, &out.PostsLastHour,
+		&out.ActiveThreads, &out.ActiveForums, &out.NewThreads,
+	); err != nil {
+		return DashboardSnapshot{}, err
 	}
 	if info, err := os.Stat(s.Store.Path); err == nil {
 		out.DBSize = info.Size()

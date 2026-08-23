@@ -18,6 +18,9 @@ Efter generalisering:
 
 - GANDR:s embedded Yggdrasil-transport kan inspirera ett separat BACKFLASH-
   cachetransportlager. Det ska ha en egen cache-peer-nyckel och ett eget protokoll.
+- BACKFLASH har nu en egen Yggdrasil-adapter under `internal/mesh/ygg`. Den
+  använder samma beprövade embedded-core-mönster, men importerar inte GANDR:s
+  `pkg/network` och delar inte nycklar.
 - GANDR:s atomiska content-addressed object store är relevant för publika
   BACKFLASH-cacheobjekt, men måste få BACKFLASH:s provenance- och storleksregler.
 

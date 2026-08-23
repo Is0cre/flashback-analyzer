@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/backflash-cli/backflash/internal/diagnostics"
 )
 
 type Client struct {
@@ -21,10 +23,12 @@ func NewClient(session SessionProvider) *Client {
 	if session == nil {
 		session = AnonymousSession{}
 	}
-	return &Client{HTTP: &http.Client{Timeout: 30 * time.Second}, Session: session, BaseURL: BaseURL, UserAgent: "BACKFLASH/0.1 (+https://github.com/backflash-cli/backflash)"}
+	return &Client{HTTP: &http.Client{Timeout: 15 * time.Second}, Session: session, BaseURL: BaseURL, UserAgent: "BACKFLASH/0.1 (+https://github.com/backflash-cli/backflash)"}
 }
 
 func (c *Client) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
+	finish := diagnostics.Start("flashback.fetch")
+	defer finish()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -58,6 +62,25 @@ func (c *Client) Threads(ctx context.Context, forum ForumNode) ([]ThreadSummary,
 		return nil, err
 	}
 	return ParseThreadListing(string(body), forum.URL, forum.ID)
+}
+
+// ForumPage parses one fetched forum page in both semantic contexts. Forum
+// pages may contain subforums, threads, or both; sharing the response avoids
+// two identical network requests when a cached node is incomplete.
+func (c *Client) ForumPage(ctx context.Context, forum ForumNode) ([]ForumNode, []ThreadSummary, error) {
+	body, err := c.Fetch(ctx, forum.URL)
+	if err != nil {
+		return nil, nil, err
+	}
+	forums, err := ParseNavigation(string(body), forum.URL)
+	if err != nil {
+		return nil, nil, err
+	}
+	threads, err := ParseThreadListing(string(body), forum.URL, forum.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return forums, threads, nil
 }
 
 func (c *Client) Search(ctx context.Context, query string, page int) ([]SearchResult, error) {

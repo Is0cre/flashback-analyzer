@@ -840,7 +840,7 @@ func loadForumChildren(s *store.Store, c *flashback.Client, n flashback.ForumNod
 				return dataMsg{kind: "forums", forums: out, refresh: state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 24*time.Hour, refreshURL: n.URL}
 			}
 		}
-		out, forumErr := c.Forum(context.Background(), n.URL)
+		out, threads, forumErr := c.ForumPage(context.Background(), n)
 		if forumErr == nil && len(out) > 0 {
 			_ = s.SaveForums(out)
 			_ = s.SetExternalSyncState(external.SyncState{Source: navigationSource + ":" + n.ID, LastSyncedAt: time.Now(), Status: "ok"})
@@ -852,18 +852,14 @@ func loadForumChildren(s *store.Store, c *flashback.Client, n flashback.ForumNod
 		// template). Never leave the user on a blank forum view: try the
 		// thread-list parser as the second semantic interpretation of the same
 		// page and persist what it finds.
-		threads, threadErr := c.Threads(context.Background(), n)
-		if threadErr == nil {
+		if forumErr == nil {
 			if err := s.SaveThreads(n.ID, threads); err != nil {
 				return dataMsg{kind: "threads", err: err}
 			}
 			_ = s.SetExternalSyncState(external.SyncState{Source: "flashback:threads:" + n.ID, LastSyncedAt: time.Now(), Status: "ok"})
 			return dataMsg{kind: "threads", threads: threads}
 		}
-		if forumErr != nil {
-			return dataMsg{kind: "forums", err: forumErr}
-		}
-		return dataMsg{kind: "forums", err: threadErr}
+		return dataMsg{kind: "forums", err: forumErr}
 	}
 }
 

@@ -163,14 +163,14 @@ class FlashbackApp(App[None]):
                 center.append(ForumThreadItem(int(row["thread_id"]), str(row["title"] or ""), row["reply_count"], bool(row["is_sticky"])))
         left.focus()
 
-    def _start_navigation_refresh(self, section_id: int | None = None) -> None:
+    def _start_navigation_refresh(self, section_id: int | None = None, *, force: bool = False) -> None:
         if self.navigation is None:
             return
-        if section_id is None and not self.navigation.is_stale():
+        if not force and section_id is None and not self.navigation.is_stale():
             return
-        self.run_worker(lambda: self._refresh_navigation(section_id), thread=True, exclusive=True)
+        self.run_worker(lambda: self._refresh_navigation(section_id, force), thread=True, exclusive=True)
 
-    def _refresh_navigation(self, section_id: int | None) -> None:
+    def _refresh_navigation(self, section_id: int | None, force: bool = False) -> None:
         try:
             # SQLite connections are thread-affine. The Textual worker must
             # use its own connection; only the completion callback touches
@@ -178,7 +178,7 @@ class FlashbackApp(App[None]):
             with Database(self.db_path) as database:
                 service = NavigationService(database, self.db_path.parent / "cache")
                 if section_id is None:
-                    service.refresh()
+                    service.refresh(force=force)
                 else:
                     service.refresh_forum(section_id, force=True)
             self.call_from_thread(self._load_forum_level)
@@ -327,7 +327,7 @@ class FlashbackApp(App[None]):
     def action_refresh(self) -> None:
         if self.forum_mode:
             section_id = self.forum_stack[-1] if self.forum_stack else None
-            self._start_navigation_refresh(section_id)
+            self._start_navigation_refresh(section_id, force=True)
         elif self.thread_id is not None:
             self.notify("Use fb sync for thread synchronization.")
 

@@ -351,6 +351,15 @@ class Database:
         self.conn.commit()
         return len(nodes)
 
+    def replace_forum_nodes(self, nodes: list[ForumNode]) -> int:
+        """Replace one source's derived menu without touching scraped data."""
+
+        source = nodes[0].source if nodes else "flashback"
+        self.conn.execute("DELETE FROM forum_threads WHERE forum_id IN (SELECT id FROM forum_sections WHERE source=?)", (source,))
+        self.conn.execute("DELETE FROM forum_sections WHERE source=?", (source,))
+        self.conn.commit()
+        return self.store_forum_nodes(nodes)
+
     def forum_roots(self, source: str = "flashback") -> list[sqlite3.Row]:
         return self.conn.execute("""SELECT * FROM forum_sections
             WHERE source=? AND parent_id IS NULL ORDER BY sort_order, title""", (source,)).fetchall()

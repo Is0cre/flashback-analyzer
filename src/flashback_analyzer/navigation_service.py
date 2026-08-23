@@ -44,7 +44,7 @@ class NavigationService:
         with Fetcher(self.cache_dir) as fetcher:
             html = fetcher.fetch_url(BASE_URL, refresh=force)
         nodes = parse_navbar(html, BASE_URL)
-        stored = self.database.store_forum_nodes(nodes)
+        stored = self.database.replace_forum_nodes(nodes)
         expires = datetime.now(timezone.utc) + self.ttl
         self.database.set_navigation_cache("flashback", "navbar", BASE_URL, expires.isoformat())
         return stored

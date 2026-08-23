@@ -43,7 +43,10 @@ def _thread_id(url: str) -> int | None:
 
 
 def _is_forum_url(url: str) -> bool:
-    return _forum_id(url) is not None or bool(re.search(r"/(?:forum|forums)(?:/|$)", urlparse(url).path, re.I))
+    # Flashback user/profile links can contain words such as "forum" and
+    # must never become navigation nodes. The numeric forum identifier is the
+    # reliable discriminator for the current adapter.
+    return _forum_id(url) is not None
 
 
 def _text(node: Tag | None) -> str:

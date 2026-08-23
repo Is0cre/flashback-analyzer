@@ -17,6 +17,15 @@ def test_navbar_preserves_arbitrary_hierarchy_and_normalizes_urls():
     assert all(node.is_browsable for node in nodes)
 
 
+def test_navbar_ignores_profile_and_non_forum_links():
+    nodes = parse_navbar("""<nav>
+        <a href='/f10'>Samhälle</a>
+        <a href='/u42'>moderator[/MOD]</a>
+        <a href='/forums/moderator'>moderator</a>
+    </nav>""")
+    assert [node.title for node in nodes] == ["Samhälle"]
+
+
 def test_forum_listing_tolerates_missing_optional_fields():
     rows = parse_forum_listing((FIXTURES / "forum_listing.html").read_text(), "https://www.flashback.org/f11")
     assert [row.thread_id for row in rows] == [1001, 1002, 1003]
@@ -38,3 +47,11 @@ def test_navigation_storage_resolves_parents_and_maps_threads(tmp_path):
         db.store_forum_thread_summaries(politics["id"], rows)
         assert [row["thread_id"] for row in db.forum_thread_rows(politics["id"])] == [1001, 1002, 1003]
         assert db.tracked_thread_rows() == []
+
+
+def test_replacing_navigation_removes_stale_nodes_without_touching_threads(tmp_path):
+    nodes = parse_navbar((FIXTURES / "navigation_root.html").read_text())
+    with Database(tmp_path / "navigation.sqlite3") as db:
+        db.store_forum_nodes(nodes)
+        db.replace_forum_nodes([nodes[0]])
+        assert [row["title"] for row in db.forum_roots()] == ["Samhälle"]

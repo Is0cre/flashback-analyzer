@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/backflash-cli/backflash/internal/config"
+	"github.com/backflash-cli/backflash/internal/diagnostics"
 	"github.com/backflash-cli/backflash/internal/flashback"
 	"github.com/backflash-cli/backflash/internal/store"
 	"github.com/backflash-cli/backflash/internal/tui"
@@ -18,20 +19,29 @@ var commit = "dev"
 var built = "okänt"
 
 func main() {
+	finish := diagnostics.Start("launcher")
+	defer finish()
 	paths := config.DefaultPaths()
 	if len(os.Args) > 1 && os.Args[1] == "version" {
 		fmt.Printf("BACKFLASH %s\ncommit: %s\nbyggd: %s\ngo: %s\nos/arkitektur: %s/%s\n", version, commit, built, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 		return
 	}
+	splashDone := diagnostics.Start("splash")
 	tui.Splash(os.Stdout, terminalWidth())
+	splashDone()
+	dbDone := diagnostics.Start("database open/migrate")
 	s, err := store.Open(paths.Database)
+	dbDone()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Kunde inte öppna databasen:", err)
 		os.Exit(1)
 	}
 	defer s.Close()
 	c := flashback.NewClient(flashback.AnonymousSession{})
-	program := tea.NewProgram(tui.New(s, c), tea.WithAltScreen())
+	appDone := diagnostics.Start("app construction")
+	model := tui.New(s, c)
+	appDone()
+	program := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "BACKFLASH avslutades med fel:", err)
 		os.Exit(1)

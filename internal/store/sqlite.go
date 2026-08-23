@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/backflash-cli/backflash/internal/diagnostics"
 	"github.com/backflash-cli/backflash/internal/flashback"
 	_ "modernc.org/sqlite"
 )
@@ -12,6 +13,8 @@ import (
 type Store struct{ DB *sql.DB }
 
 func Open(path string) (*Store, error) {
+	finish := diagnostics.Start("store.open")
+	defer finish()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
@@ -42,6 +45,11 @@ CREATE TABLE IF NOT EXISTS links (post_id TEXT NOT NULL, url TEXT NOT NULL, doma
 CREATE TABLE IF NOT EXISTS reader_state (thread_id TEXT PRIMARY KEY, last_seen_post_id TEXT, last_seen_at TEXT);
 CREATE TABLE IF NOT EXISTS external_events (source TEXT NOT NULL, external_id TEXT NOT NULL, event_time TEXT, title TEXT NOT NULL, summary TEXT, event_type TEXT, location_name TEXT, latitude REAL, longitude REAL, url TEXT, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY(source, external_id));
 CREATE TABLE IF NOT EXISTS external_sync_state (source TEXT PRIMARY KEY, last_synced_at TEXT, status TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_forums_parent_sort ON forums(parent_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_forum_threads_forum_position ON forum_threads(forum_id, position);
+CREATE INDEX IF NOT EXISTS idx_threads_last_post ON threads(last_post_at);
+CREATE INDEX IF NOT EXISTS idx_posts_thread_page_position ON posts(thread_id, page, position, id);
+CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author);
 CREATE VIRTUAL TABLE IF NOT EXISTS post_search USING fts5(post_id UNINDEXED, thread_id UNINDEXED, author, text);`)
 	return err
 }

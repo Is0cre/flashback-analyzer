@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/backflash-cli/backflash/internal/diagnostics"
 	"github.com/backflash-cli/backflash/internal/external"
 	"github.com/backflash-cli/backflash/internal/external/polisen"
 	"github.com/backflash-cli/backflash/internal/flashback"
@@ -33,15 +34,16 @@ const (
 )
 
 type dataMsg struct {
-	kind    string
-	forums  []flashback.ForumNode
-	threads []flashback.ThreadSummary
-	posts   []flashback.Post
-	results []flashback.SearchResult
-	events  []external.ExternalEvent
-	detail  *external.ExternalEvent
-	refresh bool
-	err     error
+	kind       string
+	forums     []flashback.ForumNode
+	threads    []flashback.ThreadSummary
+	posts      []flashback.Post
+	results    []flashback.SearchResult
+	events     []external.ExternalEvent
+	detail     *external.ExternalEvent
+	refresh    bool
+	refreshURL string
+	err        error
 }
 type App struct {
 	Store        *store.Store
@@ -71,6 +73,8 @@ var (
 	muted      = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	selected   = lipgloss.NewStyle().Reverse(true)
 )
+
+const navigationSource = "flashback:navigation"
 
 func New(s *store.Store, c *flashback.Client) App {
 	input := textinput.New()
@@ -112,8 +116,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.kind {
 		case "forums":
 			a.Forums, a.CurrentView = m.forums, ViewForums
+			if m.refresh {
+				target := m.refreshURL
+				if target == "" {
+					target = flashback.BaseURL
+				}
+				return a, refreshNavigation(a.Store, a.Client, target)
+			}
 		case "threads":
 			a.Threads, a.CurrentView = m.threads, ViewThreads
+			if m.refresh {
+				target := m.refreshURL
+				if target == "" {
+					target = flashback.BaseURL
+				}
+				return a, refreshThreads(a.Store, a.Client, target, activeForum(a))
+			}
 		case "posts":
 			a.Posts, a.CurrentView = m.posts, ViewReader
 		case "search":
@@ -238,6 +256,13 @@ func activeThread(a App) string {
 	}
 	return ""
 }
+
+func activeForum(a App) string {
+	if len(a.Stack) == 0 {
+		return ""
+	}
+	return a.Stack[len(a.Stack)-1].ID
+}
 func (a App) openSelected() (tea.Model, tea.Cmd) {
 	switch a.CurrentView {
 	case ViewForums:
@@ -273,6 +298,8 @@ func (a App) openSelected() (tea.Model, tea.Cmd) {
 }
 
 func (a App) View() string {
+	finish := diagnostics.Start("tui.view")
+	defer finish()
 	var b strings.Builder
 	b.WriteString(accent.Render("BACKFLASH // DISKURS-NOC"))
 	b.WriteString("\n\n")
@@ -410,6 +437,8 @@ func renderEventDetail(e external.ExternalEvent) string {
 
 func loadRoot(s *store.Store, c *flashback.Client) tea.Cmd {
 	return func() tea.Msg {
+		finish := diagnostics.Start("navigation.root")
+		defer finish()
 		rows, err := s.Forums("")
 		var out []flashback.ForumNode
 		if err == nil {
@@ -424,11 +453,13 @@ func loadRoot(s *store.Store, c *flashback.Client) tea.Cmd {
 			}
 		}
 		if len(out) > 0 {
-			return dataMsg{kind: "forums", forums: out}
+			state, _ := s.ExternalSyncState(navigationSource)
+			return dataMsg{kind: "forums", forums: out, refresh: state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 24*time.Hour, refreshURL: flashback.BaseURL}
 		}
 		nodes, e := c.Forum(context.Background(), flashback.BaseURL)
 		if e == nil {
 			_ = s.SaveForums(nodes)
+			_ = s.SetExternalSyncState(external.SyncState{Source: navigationSource, LastSyncedAt: time.Now(), Status: "ok"})
 		}
 		return dataMsg{kind: "forums", forums: nodes, err: e}
 	}
@@ -471,19 +502,37 @@ func loadForumChildren(s *store.Store, c *flashback.Client, n flashback.ForumNod
 				}
 			}
 			if len(out) > 0 {
-				return dataMsg{kind: "forums", forums: out}
+				state, _ := s.ExternalSyncState(navigationSource + ":" + n.ID)
+				return dataMsg{kind: "forums", forums: out, refresh: state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 24*time.Hour, refreshURL: n.URL}
 			}
 		}
 		out, e := c.Forum(context.Background(), n.URL)
 		if e == nil {
 			_ = s.SaveForums(out)
+			_ = s.SetExternalSyncState(external.SyncState{Source: navigationSource + ":" + n.ID, LastSyncedAt: time.Now(), Status: "ok"})
 		}
 		return dataMsg{kind: "forums", forums: out, err: e}
 	}
 }
+
+func refreshNavigation(s *store.Store, c *flashback.Client, rawURL string) tea.Cmd {
+	return func() tea.Msg {
+		nodes, err := c.Forum(context.Background(), rawURL)
+		if err != nil {
+			return dataMsg{kind: "forums", err: err}
+		}
+		if err = s.SaveForums(nodes); err != nil {
+			return dataMsg{kind: "forums", err: err}
+		}
+		_ = s.SetExternalSyncState(external.SyncState{Source: navigationSource, LastSyncedAt: time.Now(), Status: "ok"})
+		return dataMsg{kind: "forums", forums: nodes}
+	}
+}
 func loadForum(s *store.Store, c *flashback.Client, n flashback.ForumNode) tea.Cmd {
 	return func() tea.Msg {
-		dbRows, e := s.DB.Query(`SELECT id,title,url,replies,views,last_post_at,last_post_author,sticky,page_count FROM threads WHERE forum_id=? ORDER BY last_seen_at DESC`, n.ID)
+		finish := diagnostics.Start("forum.threads")
+		defer finish()
+		dbRows, e := s.DB.Query(`SELECT t.id,t.title,t.url,t.replies,t.views,t.last_post_at,t.last_post_author,t.sticky,t.page_count FROM forum_threads ft JOIN threads t ON t.id=ft.thread_id WHERE ft.forum_id=? ORDER BY ft.position`, n.ID)
 		if e == nil {
 			defer dbRows.Close()
 			var out []flashback.ThreadSummary
@@ -496,18 +545,37 @@ func loadForum(s *store.Store, c *flashback.Client, n flashback.ForumNode) tea.C
 				}
 			}
 			if len(out) > 0 {
-				return dataMsg{kind: "threads", threads: out}
+				state, _ := s.ExternalSyncState("flashback:threads:" + n.ID)
+				return dataMsg{kind: "threads", threads: out, refresh: state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 10*time.Minute, refreshURL: n.URL}
 			}
 		}
 		threads, e := c.Threads(context.Background(), n)
 		if e == nil {
 			_ = s.SaveThreads(n.ID, threads)
+			_ = s.SetExternalSyncState(external.SyncState{Source: "flashback:threads:" + n.ID, LastSyncedAt: time.Now(), Status: "ok"})
 		}
 		return dataMsg{kind: "threads", threads: threads, err: e}
 	}
 }
+
+func refreshThreads(s *store.Store, c *flashback.Client, rawURL, forumID string) tea.Cmd {
+	return func() tea.Msg {
+		forum := flashback.ForumNode{ID: forumID, URL: rawURL}
+		threads, err := c.Threads(context.Background(), forum)
+		if err != nil {
+			return dataMsg{kind: "threads", err: err}
+		}
+		if err = s.SaveThreads(forumID, threads); err != nil {
+			return dataMsg{kind: "threads", err: err}
+		}
+		_ = s.SetExternalSyncState(external.SyncState{Source: "flashback:threads:" + forumID, LastSyncedAt: time.Now(), Status: "ok"})
+		return dataMsg{kind: "threads", threads: threads}
+	}
+}
 func loadPosts(s *store.Store, c *flashback.Client, id string) tea.Cmd {
 	return func() tea.Msg {
+		finish := diagnostics.Start("thread.posts")
+		defer finish()
 		rows, e := s.Posts(id)
 		if e == nil {
 			defer rows.Close()

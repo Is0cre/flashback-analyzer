@@ -344,13 +344,13 @@ func (a App) openSelected() (tea.Model, tea.Cmd) {
 			n := a.Forums[a.Cursor]
 			a.Stack = append(a.Stack, n)
 			a.Cursor = 0
-			if n.HasChildren {
-				a.Status = "FORUM · HÄMTAR UNDERFORUM…"
-				return a, loadForumChildren(a.Store, a.Client, n)
-			}
-			a.CurrentView = ViewThreads
-			a.Status = "TRÅDAR · HÄMTAR…"
-			return a, loadForum(a.Store, a.Client, n)
+			// The persisted has_children bit is only a rendering hint. Flashback
+			// has many forum levels and templates do not always expose that fact
+			// on the parent link. Inspect the selected forum page itself; the
+			// loader chooses cached/remote subforums first, then first-page
+			// threads when it is a leaf.
+			a.Status = "FORUM · HÄMTAR…"
+			return a, loadForumChildren(a.Store, a.Client, n)
 		}
 	case ViewThreads:
 		if a.Cursor < len(a.Threads) {
@@ -840,6 +840,10 @@ func loadForumChildren(s *store.Store, c *flashback.Client, n flashback.ForumNod
 				return dataMsg{kind: "forums", forums: out, refresh: state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 24*time.Hour, refreshURL: n.URL}
 			}
 		}
+		if cached, err := cachedThreads(s, n.ID); err == nil && len(cached) > 0 {
+			state, _ := s.ExternalSyncState("flashback:threads:" + n.ID)
+			return dataMsg{kind: "threads", threads: cached, refresh: state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 10*time.Minute, refreshURL: n.URL}
+		}
 		out, threads, forumErr := c.ForumPage(context.Background(), n)
 		if forumErr == nil && len(out) > 0 {
 			_ = s.SaveForums(out)
@@ -861,6 +865,25 @@ func loadForumChildren(s *store.Store, c *flashback.Client, n flashback.ForumNod
 		}
 		return dataMsg{kind: "forums", err: forumErr}
 	}
+}
+
+func cachedThreads(s *store.Store, forumID string) ([]flashback.ThreadSummary, error) {
+	rows, err := s.DB.Query(`SELECT t.id,t.title,t.url,t.replies,t.views,t.last_post_at,t.last_post_author,t.sticky,t.page_count FROM forum_threads ft JOIN threads t ON t.id=ft.thread_id WHERE ft.forum_id=? AND trim(t.title)<>'' AND lower(trim(t.title)) NOT LIKE 'utan titel%' ORDER BY ft.position`, forumID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []flashback.ThreadSummary
+	for rows.Next() {
+		var t flashback.ThreadSummary
+		var sticky int
+		if err := rows.Scan(&t.ID, &t.Title, &t.URL, &t.Replies, &t.Views, &t.LastPostAt, &t.LastPostAuthor, &sticky, &t.PageCount); err != nil {
+			return nil, err
+		}
+		t.Sticky = sticky != 0
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 func refreshNavigation(s *store.Store, c *flashback.Client, rawURL string) tea.Cmd {

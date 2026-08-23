@@ -192,7 +192,11 @@ func (r *Runtime) Stop() error {
 		r.setState(Error, errors.New("mesh-runtime stängdes inte i tid"))
 		return errors.New("mesh-runtime stängdes inte i tid")
 	}
-	r.setState(Disabled, nil)
+	if r.cfg.Enabled {
+		r.setState(Configured, nil)
+	} else {
+		r.setState(Disabled, nil)
+	}
 	return nil
 }
 

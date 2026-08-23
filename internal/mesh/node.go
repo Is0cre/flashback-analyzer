@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/backflash-cli/backflash/internal/diagnostics"
 )
 
 // Node serves and retrieves public cache objects. A Transport implementation
@@ -157,6 +159,8 @@ func (n *Node) fetchContext(ctx context.Context, hash string) (CacheObject, erro
 }
 
 func (n *Node) acceptPeerObject(response Message, expectedHash, source, resourceID string, typ ObjectType) (CacheObject, error) {
+	verifyDone := diagnostics.Start("object_verify")
+	defer verifyDone()
 	var o CacheObject
 	if err := json.Unmarshal(response.Body, &o); err != nil {
 		return CacheObject{}, fmt.Errorf("meshobjekt är ogiltigt: %w", err)
@@ -171,6 +175,8 @@ func (n *Node) acceptPeerObject(response Message, expectedHash, source, resource
 		return CacheObject{}, errors.New("peerobjektets resurs matchar inte begäran")
 	}
 	o.Provenance = PeerOnly
+	persistDone := diagnostics.Start("object_persist")
+	defer persistDone()
 	if err := n.Store.Put(o); err != nil {
 		return CacheObject{}, err
 	}

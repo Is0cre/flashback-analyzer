@@ -8,11 +8,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // ObjectStore persists public immutable cache objects separately from the
 // BACKFLASH SQLite database and completely separately from any Gandr store.
-type ObjectStore struct{ root string }
+type ObjectStore struct {
+	root string
+
+	// resourceIndex avoids rescanning the object directory for every cache
+	// lookup. It is only an acceleration index; the object file remains the
+	// source of truth and is still hash-validated by Get.
+	mu            sync.RWMutex
+	resourceIndex map[string]string
+}
 
 func OpenObjectStore(root string) (*ObjectStore, error) {
 	if root == "" {
@@ -21,7 +30,29 @@ func OpenObjectStore(root string) (*ObjectStore, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
 	}
-	return &ObjectStore{root: root}, nil
+	store := &ObjectStore{root: root, resourceIndex: make(map[string]string)}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		hash := strings.TrimSuffix(entry.Name(), ".json")
+		o, err := store.Get(hash)
+		if err != nil {
+			// A damaged object must not prevent the cache from starting. Get
+			// will continue to reject it if it is requested later.
+			continue
+		}
+		store.resourceIndex[resourceKey(o.Source, o.ResourceID, o.Type)] = hash
+	}
+	return store, nil
+}
+
+func resourceKey(source, resourceID string, typ ObjectType) string {
+	return source + "\x00" + resourceID + "\x00" + string(typ)
 }
 
 func (s *ObjectStore) path(hash string) string { return filepath.Join(s.root, hash+".json") }
@@ -59,7 +90,13 @@ func (s *ObjectStore) Put(o CacheObject) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, s.path(o.HashString()))
+	if err := os.Rename(tmpName, s.path(o.HashString())); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.resourceIndex[resourceKey(o.Source, o.ResourceID, o.Type)] = o.HashString()
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *ObjectStore) Get(hash string) (CacheObject, error) {
@@ -98,21 +135,29 @@ func (s *ObjectStore) Count() (int, error) {
 }
 
 func (s *ObjectStore) Find(source, resourceID string, typ ObjectType) (CacheObject, error) {
-	entries, err := os.ReadDir(s.root)
-	if err != nil {
-		return CacheObject{}, err
+	if typ != "" {
+		s.mu.RLock()
+		hash := s.resourceIndex[resourceKey(source, resourceID, typ)]
+		s.mu.RUnlock()
+		if hash == "" {
+			return CacheObject{}, os.ErrNotExist
+		}
+		return s.Get(hash)
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
+	// The normal path supplies a type. Keep the wildcard fallback for callers
+	// that need it, but use the small in-memory index rather than walking files.
+	s.mu.RLock()
+	var hash string
+	for key, candidate := range s.resourceIndex {
+		parts := strings.SplitN(key, "\x00", 3)
+		if len(parts) == 3 && parts[0] == source && parts[1] == resourceID {
+			hash = candidate
+			break
 		}
-		o, err := s.Get(strings.TrimSuffix(entry.Name(), ".json"))
-		if err != nil {
-			continue
-		}
-		if o.Source == source && o.ResourceID == resourceID && (typ == "" || o.Type == typ) {
-			return o, nil
-		}
+	}
+	s.mu.RUnlock()
+	if hash != "" {
+		return s.Get(hash)
 	}
 	return CacheObject{}, os.ErrNotExist
 }

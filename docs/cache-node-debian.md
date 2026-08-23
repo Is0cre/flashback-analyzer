@@ -44,7 +44,25 @@ enabled = true
 share_cache = true
 listen = ["tcp://0.0.0.0:4242"]
 peers = ["tcp://[YGGDRASIL-PEER]:4242"]
+
+# Valfri, publik origin-sync. Hämtar endast explicit angivna forum.
+[origin]
+enabled = true
+forums = ["https://www.flashback.org/f123"]
+interval = "30m"
+max_pages = 1
+discover_subforums = true
+max_forums = 200
+batch_size = 10
 ```
+
+Origin-sync använder anonym Flashback-läsning och samma konservativa
+hastighetsgräns som övriga BACKFLASH-källor: minst 10 sekunder mellan
+förfrågningar och högst 60 per timme. Den hämtar första listningssidan för
+varje konfigurerat forum och sparar publika forum-snapshots i meshens
+objektlager. Med `discover_subforums = true` upptäcks underforum från dessa
+seed-URL:er och hämtas i batchar över tid. `max_forums` begränsar totalen och
+`batch_size` hur många forum som behandlas per intervall.
 
 Öppna endast den port och det protokoll som din Yggdrasil-konfiguration
 faktiskt använder. `0.0.0.0` i exemplet är inte en ersättning för korrekt

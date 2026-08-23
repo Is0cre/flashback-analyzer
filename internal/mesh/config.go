@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -15,19 +16,27 @@ import (
 // Config controls the public cache mesh. It is deliberately disabled unless
 // the user opts in; enabling it never unlocks or reuses Gandr state.
 type Config struct {
-	Enabled      bool
-	ShareCache   bool
-	IdentityPath string
-	ObjectPath   string
-	Listen       []string
-	Peers        []string
-	PeerKey      ed25519.PublicKey
+	Enabled                 bool
+	ShareCache              bool
+	IdentityPath            string
+	ObjectPath              string
+	Listen                  []string
+	Peers                   []string
+	PeerKey                 ed25519.PublicKey
+	OriginEnabled           bool
+	OriginForums            []string
+	OriginInterval          time.Duration
+	OriginMaxPages          int
+	OriginDiscoverSubforums bool
+	OriginMaxForums         int
+	OriginBatchSize         int
 }
 
 func DefaultConfig() Config { return Config{} }
 
 type fileConfig struct {
-	Mesh fileMeshConfig `toml:"mesh"`
+	Mesh   fileMeshConfig   `toml:"mesh"`
+	Origin fileOriginConfig `toml:"origin"`
 }
 
 type fileMeshConfig struct {
@@ -36,6 +45,16 @@ type fileMeshConfig struct {
 	Listen     []string `toml:"listen"`
 	Peers      []string `toml:"peers"`
 	PeerKey    string   `toml:"peer_key"`
+}
+
+type fileOriginConfig struct {
+	Enabled           bool     `toml:"enabled"`
+	Forums            []string `toml:"forums"`
+	Interval          string   `toml:"interval"`
+	MaxPages          int      `toml:"max_pages"`
+	DiscoverSubforums bool     `toml:"discover_subforums"`
+	MaxForums         int      `toml:"max_forums"`
+	BatchSize         int      `toml:"batch_size"`
 }
 
 // Load reads the local configuration, then applies explicitly supplied
@@ -62,8 +81,12 @@ func LoadFrom(path string) (Config, error) {
 	}
 	base := filepath.Join(dataHome, "backflash", "mesh")
 	cfg := Config{
-		IdentityPath: filepath.Join(base, "identity.key"),
-		ObjectPath:   filepath.Join(base, "objects"),
+		IdentityPath:    filepath.Join(base, "identity.key"),
+		ObjectPath:      filepath.Join(base, "objects"),
+		OriginInterval:  30 * time.Minute,
+		OriginMaxPages:  1,
+		OriginMaxForums: 200,
+		OriginBatchSize: 10,
 	}
 	if strings.TrimSpace(path) == "" {
 		return cfg, nil
@@ -84,6 +107,23 @@ func LoadFrom(path string) (Config, error) {
 	cfg.Listen = cleanList(file.Mesh.Listen)
 	cfg.Peers = cleanList(file.Mesh.Peers)
 	cfg.PeerKey = parseKey(file.Mesh.PeerKey)
+	cfg.OriginEnabled = file.Origin.Enabled
+	cfg.OriginForums = cleanList(file.Origin.Forums)
+	if file.Origin.Interval != "" {
+		if interval, err := time.ParseDuration(file.Origin.Interval); err == nil && interval >= time.Minute {
+			cfg.OriginInterval = interval
+		}
+	}
+	if file.Origin.MaxPages > 0 && file.Origin.MaxPages <= 10 {
+		cfg.OriginMaxPages = file.Origin.MaxPages
+	}
+	cfg.OriginDiscoverSubforums = file.Origin.DiscoverSubforums
+	if file.Origin.MaxForums > 0 && file.Origin.MaxForums <= 5000 {
+		cfg.OriginMaxForums = file.Origin.MaxForums
+	}
+	if file.Origin.BatchSize > 0 && file.Origin.BatchSize <= 100 {
+		cfg.OriginBatchSize = file.Origin.BatchSize
+	}
 	return cfg, nil
 }
 

@@ -37,7 +37,7 @@ type Node struct {
 	listeners  []*core.Listener
 	peer       net.Addr
 	mu         sync.Mutex
-	requestMu  sync.Mutex
+	writeMu    sync.Mutex
 	readerOnce sync.Once
 	pending    map[string]chan mesh.Message
 	readErr    chan error
@@ -110,6 +110,24 @@ func (n *Node) PublicKey() ed25519.PublicKey {
 
 func (n *Node) PublicKeyString() string { return hex.EncodeToString(n.PublicKey()) }
 
+// OverlayAddress returns the Yggdrasil IPv6 address derived by the embedded
+// transport. It is informational; protocol requests still target the public
+// key so the cache layer does not need to depend on IP addressing.
+func (n *Node) OverlayAddress() net.IP {
+	if n == nil || n.core == nil {
+		return nil
+	}
+	return append(net.IP(nil), n.core.Address()...)
+}
+
+func (n *Node) OverlayAddressString() string {
+	address := n.OverlayAddress()
+	if address == nil {
+		return ""
+	}
+	return address.String()
+}
+
 func (n *Node) ListenAddrs() []string {
 	if n == nil {
 		return nil
@@ -162,17 +180,24 @@ func (n *Node) RequestContext(ctx context.Context, request mesh.Message) (mesh.M
 			return mesh.Message{}, err
 		}
 	}
-	n.requestMu.Lock()
-	defer n.requestMu.Unlock()
 	n.startLoop(nil)
 	responseCh := make(chan mesh.Message, 1)
+	n.mu.Lock()
 	n.pending[request.ID] = responseCh
-	defer delete(n.pending, request.ID)
+	n.mu.Unlock()
+	defer func() {
+		n.mu.Lock()
+		delete(n.pending, request.ID)
+		n.mu.Unlock()
+	}()
 	for attempt := 0; ; attempt++ {
+		n.writeMu.Lock()
 		if _, err := n.core.WriteTo(b, n.peer); err != nil {
+			n.writeMu.Unlock()
 			n.lastFailed.Store(time.Now().UnixNano())
 			return mesh.Message{}, err
 		}
+		n.writeMu.Unlock()
 		n.bytesSent.Add(uint64(len(b)))
 		select {
 		case <-ctx.Done():

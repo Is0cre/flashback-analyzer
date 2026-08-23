@@ -30,7 +30,7 @@ func Parse(data []byte, now time.Time) ([]external.ExternalEvent, error) {
 }
 
 func parseFlexibleTime(value string) time.Time {
-	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05 -0700", "2006-01-02 15:04:05"} {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05 -0700", "2006-01-02 15:04:05", "2006-01-02 15:04"} {
 		if t, err := time.Parse(layout, strings.TrimSpace(value)); err == nil {
 			return t
 		}

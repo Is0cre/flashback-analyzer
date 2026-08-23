@@ -30,3 +30,13 @@ func TestParsePolisenEvents(t *testing.T) {
 		t.Fatal("malformed GPS should be ignored")
 	}
 }
+
+func TestParseDatetimeWithoutSeconds(t *testing.T) {
+	events, err := Parse([]byte(`[{"id":1,"datetime":"2026-08-23 12:34","name":"Test","location":{}}]`), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Timestamp.IsZero() || events[0].Timestamp.Year() != 2026 || events[0].Timestamp.Hour() != 12 || events[0].Timestamp.Minute() != 34 {
+		t.Fatalf("datum utan sekunder parsades fel: %#v", events)
+	}
+}

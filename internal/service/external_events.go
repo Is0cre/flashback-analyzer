@@ -31,6 +31,15 @@ func (s ExternalEventsService) Stale(source string) bool {
 	if state.Status == "permanent" {
 		return false
 	}
+	// Older builds failed to parse API datetimes without seconds and persisted
+	// year-one timestamps. Force one repair refresh instead of displaying them.
+	var invalidTimes int
+	if s.Store != nil {
+		_ = s.Store.DB.QueryRow(`SELECT COUNT(*) FROM external_events WHERE source=? AND (event_time LIKE '0001-%' OR event_time IS NULL)`, source).Scan(&invalidTimes)
+	}
+	if invalidTimes > 0 {
+		return true
+	}
 	now := time.Now()
 	if s.Now != nil {
 		now = s.Now()

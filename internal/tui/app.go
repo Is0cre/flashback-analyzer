@@ -13,6 +13,7 @@ import (
 	"github.com/backflash-cli/backflash/internal/external/polisen"
 	"github.com/backflash-cli/backflash/internal/flashback"
 	"github.com/backflash-cli/backflash/internal/gandr"
+	"github.com/backflash-cli/backflash/internal/mesh"
 	"github.com/backflash-cli/backflash/internal/service"
 	"github.com/backflash-cli/backflash/internal/store"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -93,7 +94,7 @@ func New(s *store.Store, c *flashback.Client) App {
 	input.CharLimit = 200
 	eventClient := polisen.NewClient(nil, nil)
 	eventService := &service.ExternalEventsService{Store: s, Provider: eventClient, RefreshAfter: 2 * time.Minute, Now: time.Now}
-	dashboard := &service.DashboardService{Store: s, Now: time.Now}
+	dashboard := &service.DashboardService{Store: s, Now: time.Now, MeshEnabled: mesh.Load().Enabled}
 	return App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1, EventService: eventService, DashboardSvc: dashboard, Gandr: gandr.New()}
 }
 

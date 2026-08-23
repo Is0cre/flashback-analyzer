@@ -36,8 +36,9 @@ type DashboardSnapshot struct {
 }
 
 type DashboardService struct {
-	Store *store.Store
-	Now   func() time.Time
+	Store       *store.Store
+	Now         func() time.Time
+	MeshEnabled bool
 }
 
 func (s *DashboardService) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
@@ -94,7 +95,11 @@ func (s *DashboardService) Snapshot(ctx context.Context) (DashboardSnapshot, err
 	out.Network = "—"
 	out.Session = "ANONYM"
 	out.Sync = "VILAR"
-	out.Mesh = "AV"
+	if s.MeshEnabled {
+		out.Mesh = "PÅ"
+	} else {
+		out.Mesh = "AV"
+	}
 	out.Gandr = "LÅST"
 	return out, nil
 }

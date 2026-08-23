@@ -14,6 +14,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "identity" {
+		printIdentity()
+		return
+	}
 	cfg := mesh.Load()
 	if !cfg.Enabled {
 		fatal("mesh är avstängt; sätt [mesh].enabled = true i konfigurationen")
@@ -38,6 +42,15 @@ func main() {
 		fmt.Println("Delning: AV · noden hämtar men serverar inte cacheobjekt")
 	}
 	<-ctx.Done()
+}
+
+func printIdentity() {
+	cfg := mesh.Load()
+	identity, err := mesh.LoadIdentity(cfg.IdentityPath)
+	if err != nil {
+		fatal("kunde inte läsa mesh-identiteten: %v", err)
+	}
+	fmt.Println(mesh.PublicKeyHex(identity))
 }
 
 func fatal(format string, args ...any) {

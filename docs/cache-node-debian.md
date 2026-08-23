@@ -58,6 +58,18 @@ journalctl -u backflash-cache -f
 systemctl restart backflash-cache
 ```
 
+Visa serverns publika mesh-nyckel för klientens `peer_key` utan att skriva ut
+den privata seed-filen:
+
+```bash
+sudo -u backflash BACKFLASH_CONFIG=/etc/backflash/config.toml \
+  XDG_DATA_HOME=/var/lib/backflash \
+  /usr/local/bin/backflash-cache identity
+```
+
+Kommandot skriver en 64 tecken lång hexsträng. Det är den publika nyckeln som
+ska användas på klienten. Klistra aldrig in `identity.key` i konfigurationen.
+
 Tjänsten använder `Restart=on-failure`. Vid nätverksproblem fortsätter lokal
 cache att finnas kvar och processen försöker starta om utan att någon central
 cache eller registrering krävs.

@@ -3,6 +3,7 @@ package mesh
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -61,4 +62,30 @@ func LoadOrCreateIdentity(path string) (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("meshidentitet kunde inte sparas: %w", err)
 	}
 	return ed25519.NewKeyFromSeed(seed), nil
+}
+
+// LoadIdentity loads an existing Backflash mesh identity without creating a
+// new one. It is used by diagnostics/identity commands so inspecting a node
+// cannot silently create a new peer identity.
+func LoadIdentity(path string) (ed25519.PrivateKey, error) {
+	if path == "" {
+		return nil, errors.New("meshidentitet saknar sökväg")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) != ed25519.SeedSize {
+		return nil, errors.New("meshidentitet har ogiltig storlek")
+	}
+	return ed25519.NewKeyFromSeed(data), nil
+}
+
+// PublicKeyHex returns the public half of a Backflash mesh identity as
+// configuration-safe hexadecimal text. The private seed is never returned.
+func PublicKeyHex(identity ed25519.PrivateKey) string {
+	if len(identity) != ed25519.PrivateKeySize {
+		return ""
+	}
+	return hex.EncodeToString(identity.Public().(ed25519.PublicKey))
 }

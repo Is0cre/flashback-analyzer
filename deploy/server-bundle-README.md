@@ -38,6 +38,17 @@ sudo systemctl status backflash-cache
 sudo journalctl -u backflash-cache -f
 ```
 
+Visa serverns publika mesh-nyckel för klientens `peer_key`:
+
+```bash
+sudo -u backflash BACKFLASH_CONFIG=/etc/backflash/config.toml \
+  XDG_DATA_HOME=/var/lib/backflash \
+  /usr/local/bin/backflash-cache identity
+```
+
+Detta skriver endast den publika nyckeln som hextext. Använd aldrig innehållet
+i `identity.key` som `peer_key`.
+
 ## Brandvägg
 
 Tillåt endast den port/protokollkombination som används för Yggdrasil-peering.

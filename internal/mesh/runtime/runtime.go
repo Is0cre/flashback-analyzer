@@ -83,6 +83,11 @@ func (r *Runtime) Start(parent context.Context) error {
 		r.setState(Disabled, nil)
 		return nil
 	}
+	if len(r.cfg.Peers) > 0 && len(r.cfg.PeerKey) != ed25519.PublicKeySize {
+		err := errors.New("mesh-peer är konfigurerad men peer_key saknas eller är inte 64 hextecken")
+		r.setState(Error, err)
+		return err
+	}
 	r.mu.RLock()
 	active := r.cancel != nil
 	r.mu.RUnlock()

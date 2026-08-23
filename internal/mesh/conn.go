@@ -61,14 +61,21 @@ func ServeConn(conn net.Conn, node *Node) error {
 		return errors.New("mesh-anslutning saknas")
 	}
 	defer conn.Close()
-	dec := json.NewDecoder(conn)
+	reader := bufio.NewReader(conn)
 	enc := json.NewEncoder(conn)
 	for {
-		var request Message
-		if err := dec.Decode(&request); err != nil {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
+			return err
+		}
+		if len(line) > maxMessageBody+4096 {
+			return errors.New("meshförfrågan är för stor")
+		}
+		var request Message
+		if err := json.Unmarshal(line, &request); err != nil {
 			return err
 		}
 		if len(request.Body) > maxMessageBody {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/backflash-cli/backflash/internal/service"
 	"github.com/backflash-cli/backflash/internal/store"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -78,6 +80,7 @@ type gandrSessionMsg struct {
 	channels []gandr.Channel
 	peers    []gandr.Peer
 	groups   []gandr.PrivateGroup
+	offline  bool
 	err      error
 }
 
@@ -91,6 +94,10 @@ type gandrChannelsMsg struct {
 }
 
 type gandrStatusMsg struct{ err error }
+type gandrInvitationMsg struct {
+	token string
+	err   error
+}
 type gandrDeleteMsg struct{ err error }
 type gandrPeersMsg struct {
 	peers []gandr.Peer
@@ -151,6 +158,10 @@ type App struct {
 	GandrRightCursor   int
 	MeshRuntime        *meshruntime.Runtime
 	MeshState          meshruntime.Snapshot
+	PaletteOpen        bool
+	PaletteCursor      int
+	PostViewport       viewport.Model
+	PostViewportReady  bool
 }
 
 var (
@@ -181,7 +192,7 @@ func New(s *store.Store, c *flashback.Client) App {
 	eventService := &service.ExternalEventsService{Store: s, Provider: eventClient, RefreshAfter: 2 * time.Minute, Now: time.Now}
 	meshConfig := mesh.Load()
 	dashboard := &service.DashboardService{Store: s, Now: time.Now, MeshConfigured: meshConfig.Enabled}
-	return App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1, EventService: eventService, DashboardSvc: dashboard, Gandr: gandr.New(), MeshRuntime: meshruntime.New(meshConfig)}
+	return App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1, EventService: eventService, DashboardSvc: dashboard, Gandr: gandr.New(), MeshRuntime: meshruntime.New(meshConfig), PostViewport: viewport.New(20, 6)}
 }
 
 func Splash(w io.Writer, width int) {
@@ -208,6 +219,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.Width, a.Height = m.Width, m.Height
+		a.resizePostViewport()
 	case dataMsg:
 		if m.err != nil {
 			a.Status = "FEL · " + m.err.Error()
@@ -248,6 +260,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.threadTitle != "" {
 				a.ThreadTitle = m.threadTitle
 			}
+			a.refreshPostViewport(true)
 		case "search":
 			a.Results, a.CurrentView = m.results, ViewRemoteSearch
 		case "events":
@@ -329,7 +342,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 		}
-		if m.session.Online() {
+		if m.offline {
+			a.Status = fmt.Sprintf("GANDR · lokal runtime · daemon ej ansluten · %d kanaler", len(m.channels))
+		} else if m.session.Online() {
 			a.Status = fmt.Sprintf("GANDR · nätverk ansluten · %d kanaler", len(m.channels))
 		} else {
 			a.Status = fmt.Sprintf("GANDR · lokal runtime · %d kanaler", len(m.channels))
@@ -397,6 +412,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.Status = "GANDR · kontakt blockerad lokalt"
 		}
+	case gandrInvitationMsg:
+		if m.err != nil {
+			a.Status = "GANDR · inbjudan misslyckades · " + m.err.Error()
+		} else if m.token != "" {
+			a.Status = "GANDR · kopiera denna inbjudan: " + m.token
+		} else {
+			a.Status = "GANDR · kontakt tillagd via inbjudan"
+		}
 	case gandrDeleteMsg:
 		if m.err != nil {
 			a.Status = "GANDR · radering misslyckades · " + m.err.Error()
@@ -422,6 +445,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.applyMeshSnapshot(a.MeshState)
 		return a, meshTick()
 	case tea.KeyMsg:
+		if a.PaletteOpen {
+			switch m.String() {
+			case "esc", "q", "ctrl+p", "?":
+				a.PaletteOpen = false
+				return a, nil
+			case "j", "down":
+				a.PaletteCursor = (a.PaletteCursor + 1) % len(paletteItems)
+				return a, nil
+			case "k", "up":
+				a.PaletteCursor = (a.PaletteCursor - 1 + len(paletteItems)) % len(paletteItems)
+				return a, nil
+			case "enter":
+				a.PaletteOpen = false
+				return a.runPaletteItem()
+			}
+			return a, nil
+		}
 		if a.Input.Focused() {
 			// A forgotten password must not make the destructive reset
 			// unreachable. Ctrl+X bypasses the password field, but still
@@ -486,6 +526,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return a, unlockGandr(a.Gandr, raw)
 				}
 				if a.CurrentView == ViewGandrChat {
+					if q == "/invite" {
+						return a, createGandrInvitation(a.GandrSession)
+					}
+					if strings.HasPrefix(q, "/invite accept ") {
+						return a, acceptGandrInvitation(a.GandrSession, strings.TrimSpace(strings.TrimPrefix(q, "/invite accept ")))
+					}
 					if a.GandrAddMode || strings.HasPrefix(q, "/add ") {
 						a.GandrAddMode = false
 						return a, addGandrContact(a.GandrSession, strings.TrimSpace(strings.TrimPrefix(q, "/add ")))
@@ -535,6 +581,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 		switch m.String() {
+		case "ctrl+p", "?":
+			a.PaletteOpen = true
+			a.PaletteCursor = 0
+			return a, nil
 		case "ctrl+c", "q":
 			if a.CurrentView != ViewOverview {
 				closeGandrSession(&a)
@@ -615,9 +665,29 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.CurrentView = ViewOverview
 			return a, loadDashboard(a.DashboardSvc)
 		case "j", "down":
+			if a.CurrentView == ViewReader {
+				a.move(1)
+				a.refreshPostViewport(false)
+				break
+			}
 			a.move(1)
 		case "k", "up":
+			if a.CurrentView == ViewReader {
+				a.move(-1)
+				a.refreshPostViewport(false)
+				break
+			}
 			a.move(-1)
+		case "pgdown", "ctrl+d":
+			if a.CurrentView == ViewReader {
+				a.PostViewport, _ = a.PostViewport.Update(m)
+				return a, nil
+			}
+		case "pgup", "ctrl+u":
+			if a.CurrentView == ViewReader {
+				a.PostViewport, _ = a.PostViewport.Update(m)
+				return a, nil
+			}
 		case "x":
 			if a.CurrentView == ViewGandr && a.Gandr != nil && a.Gandr.HasVault() {
 				beginGandrDelete(&a, false)
@@ -769,6 +839,47 @@ func (a *App) move(delta int) {
 	}
 	a.Cursor = (a.Cursor + delta + n) % n
 }
+
+func (a *App) resizePostViewport() {
+	if a == nil {
+		return
+	}
+	width := a.Width
+	if width < 20 {
+		width = 20
+	}
+	height := a.Height - 8
+	if height < 6 {
+		height = 6
+	}
+	a.PostViewport.Width = width
+	a.PostViewport.Height = height
+	if len(a.Posts) > 0 {
+		a.refreshPostViewport(false)
+	}
+}
+
+// refreshPostViewport keeps the reader bounded even for very large threads.
+// The selected post remains the semantic cursor; the viewport is only the
+// presentation layer around that cursor.
+func (a *App) refreshPostViewport(reset bool) {
+	if a == nil || len(a.Posts) == 0 {
+		a.PostViewportReady = false
+		return
+	}
+	a.PostViewport.SetContent(renderPosts(a.Posts, a.Cursor))
+	a.PostViewportReady = true
+	if reset {
+		a.PostViewport.GotoTop()
+		return
+	}
+	// Keep the selected post in view without forcing a complete redraw model.
+	// Moving down is cheap because the content is already held by the viewport.
+	if a.Cursor > 0 {
+		a.PostViewport.SetYOffset(min(a.Cursor*2, max(0, len(a.Posts)*2-a.PostViewport.Height)))
+	}
+}
+
 func (a App) itemCount() int {
 	switch a.CurrentView {
 	case ViewForums:
@@ -866,7 +977,11 @@ func (a App) View() string {
 		}
 		b.WriteString(viewHeading("INLÄGG", context))
 		b.WriteString("\n\n")
-		b.WriteString(renderPosts(a.Posts, a.Cursor))
+		if a.PostViewportReady {
+			b.WriteString(a.PostViewport.View())
+		} else {
+			b.WriteString(renderPosts(a.Posts, a.Cursor))
+		}
 	case ViewRemoteSearch:
 		b.WriteString(viewHeading("SÖK PÅ FLASHBACK", a.Query))
 		b.WriteString("\n\n")
@@ -949,12 +1064,100 @@ func (a App) View() string {
 	if a.Status != "" {
 		b.WriteString("\n\n" + muted.Render(a.Status))
 	}
+	if a.PaletteOpen {
+		b.WriteString("\n\n" + renderPalette(a))
+	}
 	if a.CurrentView == ViewGandr || a.CurrentView == ViewGandrChat {
 		b.WriteString("\n\n" + muted.Render("j/k flytta · Enter öppna · / kommando · Esc lämna fält · x radera valv · n radera + skapa nytt · q tillbaka"))
 	} else {
 		b.WriteString("\n\n" + muted.Render("j/k flytta · Enter öppna · ") + accent.Render("f") + muted.Render(" forum · ") + accent.Render("/") + muted.Render(" fjärrsök · ") + accent.Render("Ctrl+F") + muted.Render(" lokalt · ") + accent.Render("p") + muted.Render(" polis · ") + accent.Render("m") + muted.Render(" mesh · ") + accent.Render("g") + muted.Render(" Gandr · ") + accent.Render("h") + muted.Render(" hem · q tillbaka/avsluta"))
 	}
 	return b.String()
+}
+
+type paletteItem struct {
+	Key   string
+	Title string
+	Hint  string
+}
+
+var paletteItems = []paletteItem{
+	{Key: "h", Title: "Översikt", Hint: "lokalt NOC-dashboard"},
+	{Key: "f", Title: "Forum", Hint: "Flashbacks forumträd"},
+	{Key: "/", Title: "Fjärrsök", Hint: "sök på Flashback"},
+	{Key: "ctrl+f", Title: "Lokalsök", Hint: "sök i sparat innehåll"},
+	{Key: "p", Title: "Polishändelser", Hint: "publika händelser och karta"},
+	{Key: "m", Title: "Cache-mesh", Hint: "status och peer-cache"},
+	{Key: "g", Title: "GANDR", Hint: "separat privat subsystem"},
+}
+
+func renderPalette(a App) string {
+	width := a.Width - 8
+	if width < 42 {
+		width = 42
+	}
+	if width > 72 {
+		width = 72
+	}
+	var b strings.Builder
+	b.WriteString(sectionStyle.Render("KOMMANDOCENTER") + "  " + metadata.Render("snabbnavigering"))
+	b.WriteString("\n" + muted.Render(strings.Repeat("─", width-4)))
+	for i, item := range paletteItems {
+		line := fmt.Sprintf("%-8s %-20s %s", "["+item.Key+"]", item.Title, item.Hint)
+		line = clip(line, width-4)
+		if i == a.PaletteCursor {
+			line = selected.Render("› " + line)
+		} else {
+			line = "  " + line
+		}
+		b.WriteString("\n" + line)
+	}
+	b.WriteString("\n\n" + muted.Render("j/k välj · Enter öppna · Esc stäng"))
+	return lipgloss.NewStyle().Width(width).Border(lipgloss.DoubleBorder()).BorderForeground(lipgloss.Color("81")).Padding(0, 1).Render(b.String())
+}
+
+func (a App) runPaletteItem() (tea.Model, tea.Cmd) {
+	if a.PaletteCursor < 0 || a.PaletteCursor >= len(paletteItems) {
+		return a, nil
+	}
+	item := paletteItems[a.PaletteCursor]
+	switch item.Key {
+	case "h":
+		closeGandrSession(&a)
+		a.CurrentView, a.Cursor, a.EventDetail = ViewOverview, 0, nil
+		return a, loadDashboard(a.DashboardSvc)
+	case "f":
+		a.CurrentView, a.Cursor = ViewForums, 0
+		return a, loadRoot(a.Store, a.Client)
+	case "/", "ctrl+f":
+		a.SearchRemote = item.Key == "/"
+		a.Input.SetValue("")
+		a.Input.EchoMode = textinput.EchoNormal
+		if a.SearchRemote {
+			a.Input.Placeholder = "Sök på Flashback"
+		} else {
+			a.Input.Placeholder = "Sök lokalt"
+		}
+		a.Input.Focus()
+		return a, nil
+	case "p":
+		a.CurrentView, a.Cursor, a.EventDetail = ViewExternalEvents, 0, nil
+		return a, loadCachedEvents(a.EventService)
+	case "m":
+		a.CurrentView, a.Cursor = ViewMesh, 0
+		return a, nil
+	case "g":
+		a.CurrentView, a.Cursor = ViewGandr, 0
+		a.GandrCreating, a.GandrConfirming, a.GandrPassphrase = false, false, ""
+		a.Input.SetValue("")
+		a.Input.EchoMode = textinput.EchoPassword
+		if a.Gandr != nil && a.Gandr.HasVault() {
+			a.Input.Placeholder = "GANDR-lösenord"
+			a.Input.Focus()
+		}
+		return a, nil
+	}
+	return a, nil
 }
 func viewHeading(label, context string) string {
 	return titleStyle.Render(label) + "  " + metadata.Render("· "+context)
@@ -1100,9 +1303,9 @@ func renderGandrChat(a App) string {
 		}
 		members.WriteString("\n" + muted.Render("a lägg till · x blockera"))
 		memberView := gandrPanel(members.String(), memberWidth)
-		return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView, memberView) + "\n\n" + muted.Render("j/k kanal · ↑/↓ användare · Enter skriv · a lägg till · /grupp skapa|öppna · x blockera · q tillbaka")
+		return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView, memberView) + "\n\n" + muted.Render("j/k kanal · ↑/↓ användare · Enter skriv · a lägg till · /invite · /grupp skapa|öppna · x blockera · q tillbaka")
 	}
-	return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView) + "\n\n" + muted.Render("j/k kanal · Enter skriv · a lägg till · /grupp lista · q tillbaka")
+	return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView) + "\n\n" + muted.Render("j/k kanal · Enter skriv · /invite · /grupp lista · q tillbaka")
 }
 
 func gandrPanel(content string, width int) string {
@@ -1586,9 +1789,18 @@ func connectGandr(subsystem *gandr.Subsystem) tea.Cmd {
 		if subsystem == nil {
 			return gandrSessionMsg{err: fmt.Errorf("GANDR-gränsen saknas")}
 		}
-		session, err := subsystem.Connect("")
+		socket := gandrSocketPath()
+		session, err := subsystem.Connect(socket)
+		offline := false
 		if err != nil {
-			return gandrSessionMsg{err: err}
+			// Keep the local encrypted chat usable when gandrd is stopped. The
+			// session is deliberately marked offline; sends are stored locally
+			// and are not presented as delivered over the network.
+			session, err = subsystem.Connect("")
+			if err != nil {
+				return gandrSessionMsg{err: err}
+			}
+			offline = true
 		}
 		channels, err := session.Channels()
 		if err != nil {
@@ -1610,8 +1822,15 @@ func connectGandr(subsystem *gandr.Subsystem) tea.Cmd {
 		}
 		peers, _ := session.Peers(ctx)
 		groups, _ := session.PrivateGroups()
-		return gandrSessionMsg{session: session, channels: channels, peers: peers, groups: groups}
+		return gandrSessionMsg{session: session, channels: channels, peers: peers, groups: groups, offline: offline}
 	}
+}
+
+func gandrSocketPath() string {
+	if path := strings.TrimSpace(os.Getenv("BACKFLASH_GANDR_SOCKET")); path != "" {
+		return path
+	}
+	return "/var/run/gandrd/gandr.sock"
 }
 
 func loadGandrPeers(session *gandr.Session) tea.Cmd {
@@ -1708,6 +1927,25 @@ func addGandrContact(session *gandr.Session, value string) tea.Cmd {
 			return gandrContactMsg{err: fmt.Errorf("namn saknas")}
 		}
 		return gandrContactMsg{err: session.AddContact(pubkey, name, "")}
+	}
+}
+
+func createGandrInvitation(session *gandr.Session) tea.Cmd {
+	return func() tea.Msg {
+		token, err := session.CreateInvitation()
+		return gandrInvitationMsg{token: token, err: err}
+	}
+}
+
+func acceptGandrInvitation(session *gandr.Session, value string) tea.Cmd {
+	return func() tea.Msg {
+		parts := strings.Fields(value)
+		if len(parts) == 0 {
+			return gandrInvitationMsg{err: fmt.Errorf("använd: /invite accept INBJUDAN [NAMN]")}
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(value, parts[0]))
+		_, err := session.AcceptInvitation(parts[0], name)
+		return gandrInvitationMsg{err: err}
 	}
 }
 

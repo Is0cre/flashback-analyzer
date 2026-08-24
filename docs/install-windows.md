@@ -51,5 +51,20 @@ peer_key = "PEERNS-64-TECKEN-LÅNGA-PUBLIKA-NYCKEL"
 `identity.key` i konfigurationen. BACKFLASH-meshens identitet är separat från
 GANDR och Flashback-sessioner.
 
+Installationsskriptet frågar också om du vill ansluta till BACKFLASH:s publika
+cache-nätverk. Den förkonfigurerade bootstrap-peeren är:
+
+```text
+tcp://77.42.49.189:4242
+publik nyckel: 4a29e1f805ed75a1974991b39b9878cbb060eaf276a8f6b028940ad14680d4f5
+```
+
+Svara `N` för lokal/offline användning eller `J` för att delta i cache-nätet.
+Hoppa över frågan och lämna mesh avstängt med:
+
+```powershell
+.\install-backflash-windows.ps1 -Binary .\backflash-windows-amd64.exe -SkipNetworkPrompt -SkipFirewall
+```
+
 Om du inte använder mesh behövs ingen brandväggsregel och ingen handskriven
 konfiguration.

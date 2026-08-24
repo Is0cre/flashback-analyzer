@@ -1,0 +1,8 @@
+# Offentlig BACKFLASH-nätverksprofil.
+# Detta är publik anslutningsinformation, aldrig en privat nyckel.
+
+[network]
+name = "BACKFLASH public cache"
+version = 1
+endpoint = "tcp://77.42.49.189:4242"
+peer_key = "4a29e1f805ed75a1974991b39b9878cbb060eaf276a8f6b028940ad14680d4f5"

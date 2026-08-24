@@ -42,6 +42,54 @@ func TestBackFromFeatureReturnsToDashboard(t *testing.T) {
 	}
 }
 
+func TestCommandPaletteOpensAndCloses(t *testing.T) {
+	a := New(nil, nil)
+	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	updated := model.(App)
+	if !updated.PaletteOpen {
+		t.Fatal("frågetecken öppnade inte kommandocentret")
+	}
+	if !strings.Contains(updated.View(), "KOMMANDOCENTER") {
+		t.Fatal("kommandocentret renderades inte")
+	}
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	if model.(App).PaletteOpen {
+		t.Fatal("Esc stängde inte kommandocentret")
+	}
+}
+
+func TestCommandPaletteOpensForum(t *testing.T) {
+	a := New(nil, nil)
+	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	updated := model.(App)
+	// Forum is the second item in the palette.
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model, _ = model.(App).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if model.(App).CurrentView != ViewForums {
+		t.Fatalf("kommandocentret öppnade inte forumvyn: %v", model.(App).CurrentView)
+	}
+}
+
+func TestReaderUsesBoundedViewport(t *testing.T) {
+	a := New(nil, nil)
+	a.Width, a.Height = 80, 24
+	a.resizePostViewport()
+	a.Posts = make([]flashback.Post, 80)
+	for i := range a.Posts {
+		a.Posts[i] = flashback.Post{ID: string(rune('a' + i%26)), Author: "användare", Text: "ett långt inlägg som ska kunna scrollas"}
+	}
+	a.refreshPostViewport(true)
+	if !a.PostViewportReady {
+		t.Fatal("läsarens viewport initierades inte")
+	}
+	if a.PostViewport.Height != 16 {
+		t.Fatalf("oväntad viewporthöjd: %d", a.PostViewport.Height)
+	}
+	if got := a.PostViewport.TotalLineCount(); got <= a.PostViewport.Height {
+		t.Fatalf("viewporten innehåller inte en längre tråd: %d rader", got)
+	}
+}
+
 func TestGandrStartsLocked(t *testing.T) {
 	a := New(nil, nil)
 	if a.Gandr == nil {

@@ -11,10 +11,14 @@ param(
     [string]$InstallDir = "$env:LOCALAPPDATA\Backflash",
     [int]$MeshPort = 4242,
     [switch]$SkipFirewall,
-    [switch]$OpenFirewall
+    [switch]$OpenFirewall,
+    [switch]$SkipNetworkPrompt,
+    [switch]$JoinPublicNetwork
 )
 
 $ErrorActionPreference = "Stop"
+$publicPeerEndpoint = "tcp://77.42.49.189:4242"
+$publicPeerKey = "4a29e1f805ed75a1974991b39b9878cbb060eaf276a8f6b028940ad14680d4f5"
 
 function Write-Info([string]$Message) {
     Write-Host "BACKFLASH: $Message" -ForegroundColor Cyan
@@ -70,6 +74,38 @@ peer_key = ""
     Write-Info "Skapade konfiguration: $configPath"
 } else {
     Write-Info "Behåller befintlig konfiguration: $configPath"
+}
+
+$joinNetwork = $JoinPublicNetwork
+if (-not $SkipNetworkPrompt -and -not $JoinPublicNetwork) {
+    Write-Host ""
+    Write-Host "BACKFLASH har ett frivilligt publikt cache-nätverk." -ForegroundColor Yellow
+    Write-Host "Det delar endast publika, verifierade cacheobjekt mellan BACKFLASH-peers."
+    Write-Host "Det delar inte Flashback-cookie, läshistorik, sökningar eller GANDR-data."
+    $answer = Read-Host "Anslut till BACKFLASH publika cache-nätverk? [j/N]"
+    $joinNetwork = $answer -match "^(j|ja|y|yes)$"
+}
+
+if ($joinNetwork) {
+    $existing = Get-Content -Raw $configPath
+    if ($existing -match "enabled\s*=\s*true") {
+        Write-Info "Mesh är redan aktiverad i befintlig konfiguration."
+    } else {
+        @"
+# BACKFLASH publikt cache-nätverk
+# Endast publika cacheobjekt delas. GANDR och läshistorik hålls lokalt.
+
+[mesh]
+enabled = true
+share_cache = true
+listen = ["tcp://0.0.0.0:$MeshPort"]
+peers = ["$publicPeerEndpoint"]
+peer_key = "$publicPeerKey"
+"@ | Set-Content -Encoding UTF8 $configPath
+        Write-Info "Anslöt klienten till BACKFLASH publika cache-nätverk."
+    }
+} else {
+    Write-Info "Klienten lämnas lokal/offline. Mesh kan aktiveras senare i $configPath"
 }
 
 Write-Info "Installerade binär: $target"

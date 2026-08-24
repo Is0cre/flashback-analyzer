@@ -115,15 +115,13 @@ func (r *Runtime) Start(parent context.Context) error {
 	ctx, cancel := context.WithCancel(parent)
 	r.mu.Lock()
 	r.identity, r.transport, r.store = identity, transport, objectStore
-	cache := &mesh.Node{Store: objectStore, Peer: transport}
+	cache := &mesh.Node{Store: objectStore, Peer: transport, DenyGet: !r.cfg.ShareCache}
 	r.cache = cache
 	r.cancel, r.done, r.startedAt = cancel, make(chan struct{}), time.Now()
 	r.mu.Unlock()
-	if r.cfg.ShareCache {
-		transport.Prepare(cache)
-	} else {
-		transport.Prepare(nil)
-	}
+	// The handler is installed even when serving is disabled so this node can
+	// still receive public HAVE announcements. ServeObjects gates GET replies.
+	transport.Prepare(cache)
 	go r.serve(ctx)
 	go r.monitor(ctx)
 	if transport.PeerCount() > 0 {
@@ -248,7 +246,13 @@ func (r *Runtime) PutLocal(object mesh.CacheObject) error {
 	if store == nil {
 		return errors.New("mesh-lagring är inte startad")
 	}
-	return store.Put(object)
+	r.mu.RLock()
+	cache := r.cache
+	r.mu.RUnlock()
+	if cache == nil {
+		return errors.New("mesh-cache saknas")
+	}
+	return cache.PutLocal(object)
 }
 
 func (r *Runtime) Snapshot() Snapshot {
@@ -293,6 +297,10 @@ func (r *Runtime) PublicKey() ed25519.PublicKey {
 	return r.transport.PublicKey()
 }
 
+func (r *Runtime) PublicKeyString() string {
+	return hex.EncodeToString(r.PublicKey())
+}
+
 func (r *Runtime) ListenAddrs() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -300,4 +308,20 @@ func (r *Runtime) ListenAddrs() []string {
 		return nil
 	}
 	return r.transport.ListenAddrs()
+}
+
+// Invite returns a public-only connection invite. Advertise addresses are
+// explicit because listen addresses often contain 0.0.0.0 or private binds.
+func (r *Runtime) Invite() (string, error) {
+	r.mu.RLock()
+	key := r.transport
+	endpoints := append([]string(nil), r.cfg.Advertise...)
+	if len(endpoints) == 0 && key != nil {
+		endpoints = append(endpoints, r.transport.ListenAddrs()...)
+	}
+	r.mu.RUnlock()
+	if key == nil {
+		return "", errors.New("mesh-transport är inte startad")
+	}
+	return mesh.EncodeInvite(key.PublicKey(), endpoints)
 }

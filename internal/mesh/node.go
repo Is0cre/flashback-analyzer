@@ -16,8 +16,11 @@ import (
 type Node struct {
 	Store *ObjectStore
 	Peer  Transport
-	mu    sync.Mutex
-	busy  map[string]*getCall
+	// DenyGet is used by a consuming-only runtime. The zero value preserves
+	// the historical Node behaviour for direct/in-process callers: serve GET.
+	DenyGet bool
+	mu      sync.Mutex
+	busy    map[string]*getCall
 }
 
 type getCall struct {
@@ -27,10 +30,13 @@ type getCall struct {
 }
 
 func (n *Node) Serve(request Message) (Message, error) {
+	if request.Type == Have {
+		return n.acceptAnnouncement(request)
+	}
 	if request.Type != Get {
 		return Message{Type: NotFound}, fmt.Errorf("okänd meshförfrågan: %s", request.Type)
 	}
-	if n == nil || n.Store == nil {
+	if n == nil || n.Store == nil || n.DenyGet {
 		return Message{Type: NotFound}, errors.New("mesh-lagring saknas")
 	}
 	var o CacheObject
@@ -48,6 +54,49 @@ func (n *Node) Serve(request Message) (Message, error) {
 		return Message{Type: NotFound}, err
 	}
 	return Message{Type: Object, Hash: o.HashString(), Body: b}, nil
+}
+
+func (n *Node) acceptAnnouncement(request Message) (Message, error) {
+	if n == nil || n.Store == nil {
+		return Message{}, errors.New("mesh-lagring saknas")
+	}
+	var object CacheObject
+	if err := json.Unmarshal(request.Body, &object); err != nil {
+		return Message{}, fmt.Errorf("HAVE-objektet är ogiltigt: %w", err)
+	}
+	if request.Hash == "" || object.HashString() != request.Hash {
+		return Message{}, errors.New("HAVE-objektet har fel hash")
+	}
+	if request.Source != "" && (object.Source != request.Source || object.ResourceID != request.ResourceID || object.Type != ObjectType(request.ObjectType)) {
+		return Message{}, errors.New("HAVE-objektets resurs stämmer inte")
+	}
+	object.Provenance = PeerOnly
+	if err := n.Store.Put(object); err != nil {
+		return Message{}, err
+	}
+	return Message{Type: Have, Hash: object.HashString()}, nil
+}
+
+// PutLocal stores an object locally and opportunistically announces it to the
+// configured peer. Replication is deliberately best-effort and never makes
+// local reading fail when a peer is offline.
+func (n *Node) PutLocal(object CacheObject) error {
+	if n == nil || n.Store == nil {
+		return errors.New("mesh-lagring saknas")
+	}
+	if err := n.Store.Put(object); err != nil {
+		return err
+	}
+	if publisher, ok := n.Peer.(Publisher); ok {
+		body, err := json.Marshal(object)
+		if err == nil {
+			message := Message{Type: Have, Hash: object.HashString(), Source: object.Source, ResourceID: object.ResourceID, ObjectType: string(object.Type), Body: body}
+			// A failed announcement is intentionally non-fatal. The next local
+			// refresh or archive pass can announce it again.
+			go func() { _ = publisher.Publish(message) }()
+		}
+	}
+	return nil
 }
 
 func (n *Node) Get(hash string) (CacheObject, error) {

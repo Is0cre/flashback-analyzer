@@ -51,6 +51,13 @@ Mesh är avstängd som standard. `enabled` startar transporten; `share_cache`
 avgör om den får svara på GET för publika cacheobjekt. En nod kan alltså
 hämta från peers utan att dela sin lokala cache.
 
+När en klient sparar en ny publik trådsida lokalt annonseras objektet
+asynkront med `HAVE` till den konfigurerade peeren. Objektet skickas med sin
+content-addressed payload, verifieras av mottagaren och sparas som
+`PEER_ONLY`. Publiceringen är best-effort och blockerar aldrig läsning eller
+lokal lagring. `share_cache = false` stoppar GET-svar men hindrar inte noden
+från att ta emot publika HAVE-objekt.
+
 ## Runtime-state
 
 ```text

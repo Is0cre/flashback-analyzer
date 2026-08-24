@@ -218,6 +218,37 @@ func (n *Node) RequestContext(ctx context.Context, request mesh.Message) (mesh.M
 	}
 }
 
+// Publish sends a public-cache announcement without waiting for a response.
+// It is intentionally best-effort; local persistence is the source of truth.
+func (n *Node) Publish(message mesh.Message) error {
+	if n == nil || n.core == nil || n.peer == nil {
+		return errors.New("Yggdrasil-peer saknas")
+	}
+	b, err := json.Marshal(message)
+	if err != nil {
+		return err
+	}
+	if len(b) > mesh.MaxObjectSize+1<<20 {
+		return errors.New("HAVE-objektet är för stort")
+	}
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		n.writeMu.Lock()
+		_, err = n.core.WriteTo(b, n.peer)
+		n.writeMu.Unlock()
+		if err == nil {
+			n.bytesSent.Add(uint64(len(b)))
+			return nil
+		}
+		lastErr = err
+		n.lastFailed.Store(time.Now().UnixNano())
+		if attempt < 3 {
+			time.Sleep(retryDelay(attempt))
+		}
+	}
+	return lastErr
+}
+
 func retryDelay(attempt int) time.Duration {
 	if attempt > 3 {
 		attempt = 3
@@ -261,8 +292,15 @@ func (n *Node) startLoop(handler *mesh.Node) {
 				if err := json.Unmarshal(buf[:nread], &request); err != nil {
 					continue
 				}
-				if request.Type == mesh.Get && n.handler != nil {
+				if (request.Type == mesh.Get || request.Type == mesh.Have) && n.handler != nil {
 					response, err := n.handler.Serve(request)
+					if request.Type == mesh.Have {
+						if err == nil {
+							n.received.Add(1)
+							n.lastOK.Store(time.Now().UnixNano())
+						}
+						continue
+					}
 					response.ID = request.ID
 					if err != nil {
 						response = mesh.Message{Type: mesh.NotFound, Hash: request.Hash, ID: request.ID}

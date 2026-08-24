@@ -45,6 +45,10 @@ share_cache = true
 listen = ["tcp://0.0.0.0:4242"]
 peers = ["tcp://[YGGDRASIL-PEER]:4242"]
 
+# Adress som ska skickas i en publik nätverksinbjudan.
+# Detta är inte nödvändigt för drift, men gör onboarding enklare.
+advertise = ["tcp://SERVERNS-NÅBARA-ADRESS:4242"]
+
 # Valfri, publik origin-sync. Hämtar endast explicit angivna forum.
 [origin]
 enabled = true
@@ -69,6 +73,33 @@ faktiskt använder. `0.0.0.0` i exemplet är inte en ersättning för korrekt
 Yggdrasil-peering eller brandväggsregler.
 
 ## Drift
+
+För en interaktiv, liten operatörskonsol kör du den manuellt när systemd-
+tjänsten är stoppad:
+
+```bash
+sudo systemctl stop backflash-cache
+sudo -u backflash BACKFLASH_CONFIG=/etc/backflash/config.toml \
+  XDG_DATA_HOME=/var/lib/backflash /usr/local/bin/backflash-cache tui
+```
+
+Konsolen visar health, runtime-state, anslutna peers, objekt, RX/TX och ett
+enkelt paketflöde. `k` visar/döljer den fullständiga publika nyckeln och `i`
+skapar en nätverksinbjudan. Inbjudan innehåller endast publik peer-nyckel och
+annonserad endpoint — aldrig den privata `identity.key`.
+
+Starta tjänsten igen med `q`:
+
+```bash
+sudo systemctl start backflash-cache
+```
+
+Det går också att skriva ut en inbjudan utan TUI:
+
+```bash
+sudo -u backflash BACKFLASH_CONFIG=/etc/backflash/config.toml \
+  XDG_DATA_HOME=/var/lib/backflash /usr/local/bin/backflash-cache invite
+```
 
 ```bash
 systemctl status backflash-cache

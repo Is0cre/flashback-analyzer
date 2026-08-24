@@ -1,0 +1,32 @@
+name: BACKFLASH release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify
+        run: |
+          go test ./...
+          go vet ./...
+      - name: Build release assets
+        run: ./deploy/build-release.sh "${GITHUB_REF_NAME}"
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/release/${{ github.ref_name }}/*

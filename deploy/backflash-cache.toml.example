@@ -8,6 +8,10 @@ share_cache = true
 # Lyssna på den privata Yggdrasil-adressen eller en lokal testadress.
 listen = ["tcp://0.0.0.0:4242"]
 
+# Publika adresser som ska hamna i nätverksinbjudan.
+# Använd inte 0.0.0.0 här; ange serverns nåbara adress.
+advertise = ["tcp://SERVER-ADRESS:4242"]
+
 # Lägg till kända Yggdrasil-peers här. Lämna tomt om peering läggs till senare.
 peers = []
 

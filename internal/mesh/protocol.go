@@ -26,6 +26,12 @@ type ContextTransport interface {
 	RequestContext(context.Context, Message) (Message, error)
 }
 
+// Publisher is the optional fire-and-forget path used for opportunistic
+// public-cache replication. It carries only a canonical public cache object.
+type Publisher interface {
+	Publish(Message) error
+}
+
 type Message struct {
 	Type       MessageType `json:"type"`
 	ID         string      `json:"id,omitempty"`

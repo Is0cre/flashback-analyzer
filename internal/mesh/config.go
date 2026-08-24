@@ -21,6 +21,7 @@ type Config struct {
 	IdentityPath            string
 	ObjectPath              string
 	Listen                  []string
+	Advertise               []string
 	Peers                   []string
 	PeerKey                 ed25519.PublicKey
 	OriginEnabled           bool
@@ -43,6 +44,7 @@ type fileMeshConfig struct {
 	Enabled    bool     `toml:"enabled"`
 	ShareCache bool     `toml:"share_cache"`
 	Listen     []string `toml:"listen"`
+	Advertise  []string `toml:"advertise"`
 	Peers      []string `toml:"peers"`
 	PeerKey    string   `toml:"peer_key"`
 }
@@ -105,6 +107,7 @@ func LoadFrom(path string) (Config, error) {
 	cfg.Enabled = file.Mesh.Enabled
 	cfg.ShareCache = file.Mesh.ShareCache
 	cfg.Listen = cleanList(file.Mesh.Listen)
+	cfg.Advertise = cleanList(file.Mesh.Advertise)
 	cfg.Peers = cleanList(file.Mesh.Peers)
 	cfg.PeerKey = parseKey(file.Mesh.PeerKey)
 	cfg.OriginEnabled = file.Origin.Enabled

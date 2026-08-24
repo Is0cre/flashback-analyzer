@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -116,6 +118,49 @@ func TestShareCacheFalseDoesNotServePeerObjects(t *testing.T) {
 	}
 }
 
+func TestLocalObjectIsOpportunisticallyReplicatedToPeer(t *testing.T) {
+	root := t.TempDir()
+	aAddr := freeMeshAddress(t)
+	bAddr := freeMeshAddress(t)
+	aIdentity, err := mesh.LoadOrCreateIdentity(filepath.Join(root, "a.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bIdentity, err := mesh.LoadOrCreateIdentity(filepath.Join(root, "b.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New(mesh.Config{Enabled: true, ShareCache: true, IdentityPath: filepath.Join(root, "a.key"), ObjectPath: filepath.Join(root, "a-objects"), Listen: []string{"tcp://" + aAddr}, Peers: []string{"tcp://" + bAddr}, PeerKey: bIdentity.Public().(ed25519.PublicKey)})
+	b := New(mesh.Config{Enabled: true, ShareCache: false, IdentityPath: filepath.Join(root, "b.key"), ObjectPath: filepath.Join(root, "b-objects"), Listen: []string{"tcp://" + bAddr}, Peers: []string{"tcp://" + aAddr}, PeerKey: aIdentity.Public().(ed25519.PublicKey)})
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer a.Stop()
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer b.Stop()
+	waitFor(t, 10*time.Second, func() bool { return b.Snapshot().Peers > 0 })
+	object := mesh.NewObject(mesh.ThreadPageSnapshot, "flashback", "t-publish:1", time.Now(), []byte("opportunistic"), mesh.OriginVerified)
+	if err := a.PutLocal(object); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := b.Get(object.HashString()); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	fetched, err := b.Get(object.HashString())
+	if err != nil {
+		t.Fatalf("HAVE-replikering misslyckades: %v A=%+v B=%+v", err, a.Snapshot(), b.Snapshot())
+	}
+	if fetched.Provenance != mesh.PeerOnly {
+		t.Fatalf("annonserat objekt fick provenance %s, väntade PEER_ONLY", fetched.Provenance)
+	}
+}
+
 func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -125,4 +170,17 @@ func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
 	if !condition() {
 		t.Fatal("villkor uppnåddes inte inom timeout")
 	}
+}
+
+func freeMeshAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return address
 }

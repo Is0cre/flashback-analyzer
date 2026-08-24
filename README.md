@@ -20,6 +20,21 @@ go run ./cmd/backflash
 go run ./cmd/backflash version
 ```
 
+### Windows
+
+För en färdig Windows 64-bitarsbinär, öppna PowerShell i katalogen där
+`backflash-windows-amd64.exe` och installationsskriptet ligger:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\deploy\install-backflash-windows.ps1 -Binary .\backflash-windows-amd64.exe
+```
+
+Skriptet skapar lokal konfiguration och frågar separat om TCP-port 4242 ska
+öppnas för den frivilliga publika cache-meshen. Vanlig lokal läsning kräver
+ingen brandväggsregel och mesh är avstängt som standard. Fullständig Windows-
+installation finns i [docs/install-windows.md](docs/install-windows.md).
+
 Read-only grund för att samla in och analysera Flashback-trådar utan att blanda ihop citerad text med nya påståenden.
 
 ## Vad v0.1 gör

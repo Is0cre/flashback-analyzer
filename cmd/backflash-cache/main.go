@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
+	"github.com/backflash-cli/backflash/internal/cacheui"
 	"github.com/backflash-cli/backflash/internal/flashback"
 	"github.com/backflash-cli/backflash/internal/mesh"
 	meshruntime "github.com/backflash-cli/backflash/internal/mesh/runtime"
@@ -20,11 +22,20 @@ import (
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "version":
+			fmt.Printf("BACKFLASH CACHE %s\ncommit: %s\nbyggd: %s\ngo: %s\nos/arkitektur: %s/%s\n", version, commit, built, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+			return
 		case "identity":
 			printIdentity()
 			return
 		case "get":
 			getObject(os.Args[2:])
+			return
+		case "tui":
+			runTUI()
+			return
+		case "invite":
+			printInvite()
 			return
 		}
 	}
@@ -64,6 +75,49 @@ func main() {
 		}
 	}
 	<-ctx.Done()
+}
+
+var version = "0.1.0"
+var commit = "dev"
+var built = "okänt"
+
+func runTUI() {
+	cfg := mesh.Load()
+	if !cfg.Enabled {
+		fatal("mesh är avstängt; sätt [mesh].enabled = true i konfigurationen")
+	}
+	runtime := meshruntime.New(cfg)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runtime.Start(ctx); err != nil {
+		fatal("kunde inte starta mesh: %v", err)
+	}
+	defer runtime.Stop()
+	if err := cacheui.Run(runtime, cfg); err != nil {
+		fatal("cache-TUI avslutades med fel: %v", err)
+	}
+}
+
+func printInvite() {
+	cfg := mesh.Load()
+	identity, err := mesh.LoadIdentity(cfg.IdentityPath)
+	if err != nil {
+		fatal("kunde inte läsa mesh-identiteten: %v · starta cache-peeren först", err)
+	}
+	transport, err := ygg.New(ygg.Config{PrivateKey: identity})
+	if err != nil {
+		fatal("kunde inte beräkna Yggdrasil-nyckeln: %v", err)
+	}
+	defer transport.Close()
+	endpoints := cfg.Advertise
+	if len(endpoints) == 0 {
+		endpoints = cfg.Listen
+	}
+	invite, err := mesh.EncodeInvite(transport.PublicKey(), endpoints)
+	if err != nil {
+		fatal("kunde inte skapa inbjudan: %v", err)
+	}
+	fmt.Println(invite)
 }
 
 // getObject is a deliberately small diagnostic command for a real mesh test.

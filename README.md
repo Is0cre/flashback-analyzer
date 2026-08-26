@@ -10,10 +10,9 @@ identitetselement; BACKFLASH är inte en officiell Flashback-klient.
 
 ## Go-klienten
 
-En Go-port byggs parallellt som den framtida distribuerbara klienten. Den
-använder Bubble Tea, SQLite och Flashbacks strukturella HTML-adapter. Python
-versionen ligger kvar som referens tills Go-klienten nått första
-funktionsparitet.
+Go-klienten är den aktiva och distribuerbara implementationen. Den använder
+Bubble Tea, SQLite och Flashbacks strukturella HTML-adapter. Python-versionen
+är utfasad; kvarvarande HTML-fixtures används av Go-testsviten.
 
 ```bash
 go run ./cmd/backflash
@@ -60,12 +59,8 @@ inloggning, CAPTCHA eller ålderskontroll.
 ## Installation
 
 ```bash
-cd flashback-analyzer
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -U pip
-pip install -e '.[dev]'
-pytest -q
+go build -o backflash ./cmd/backflash
+./backflash version
 ```
 
 ## Första körningen

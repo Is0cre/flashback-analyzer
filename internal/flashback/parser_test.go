@@ -140,3 +140,18 @@ func TestParseThreadPage(t *testing.T) {
 		t.Fatalf("unexpected page: %#v", page)
 	}
 }
+
+func TestParseThreadPageReadsTotalPagesFromFirstPageMetadata(t *testing.T) {
+	html := `<!doctype html><html><body>
+		<h1>Sidtest</h1>
+		<span class="input-page-jump" data-total-pages="42" data-page="1">Sidan 1 av 42</span>
+		<div class="post" id="post_9001"><div class="post-user-username">Alice</div><div class="post_message">Hej</div></div>
+	</body></html>`
+	page, err := ParseThreadPage(html, BaseURL+"t9000", "9000", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.MaxPage != 42 {
+		t.Fatalf("first-page pagination metadata was not parsed: got %d, want 42", page.MaxPage)
+	}
+}

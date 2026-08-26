@@ -969,7 +969,7 @@ func (a App) View() string {
 	case ViewThreads:
 		b.WriteString(viewHeading("TRÅDAR", a.breadcrumb()))
 		b.WriteString("\n\n")
-		b.WriteString(renderThreads(a.Threads, a.Cursor))
+		b.WriteString(renderThreadWorkspace(a))
 	case ViewReader:
 		context := a.ThreadTitle
 		if context == "" {
@@ -1362,6 +1362,88 @@ func renderThreads(xs []flashback.ThreadSummary, c int) string {
 		b.WriteString(line + "\n")
 	}
 	return b.String()
+}
+
+// renderThreadWorkspace keeps forum context visible while the thread list is
+// being browsed. The list remains driven by the current cursor, so this is a
+// presentation layout only; loading and persistence stay in the services.
+func renderThreadWorkspace(a App) string {
+	width := a.Width
+	if width < 1 {
+		width = 120
+	}
+	if width < 100 {
+		return renderThreads(a.Threads, a.Cursor)
+	}
+
+	leftWidth, rightWidth := 27, 39
+	centerWidth := width - leftWidth - rightWidth - 6
+	if centerWidth < 34 {
+		centerWidth = 34
+	}
+
+	left := []string{".."}
+	for i, node := range a.Stack {
+		marker := "  "
+		if i == len(a.Stack)-1 {
+			marker = "› "
+		}
+		left = append(left, marker+clip(node.Title, leftWidth-4))
+	}
+	if len(a.Stack) == 0 {
+		left = append(left, muted.Render("Ingen forumvald"))
+	}
+
+	threadLines := make([]string, 0, len(a.Threads)*2+1)
+	if len(a.Threads) == 0 {
+		threadLines = append(threadLines, muted.Render("Ingen trådar hämtade ännu."), muted.Render("Tryck r för att uppdatera."))
+	} else {
+		for i, thread := range a.Threads {
+			title := firstNonEmpty(thread.Title, "Tråd #"+thread.ID)
+			prefix := fmt.Sprintf("%3d ", i+1)
+			if thread.Sticky {
+				prefix = "📌 " + prefix
+			}
+			line := prefix + clip(title, centerWidth-4)
+			meta := fmt.Sprintf("    #%s · %s svar · %s visningar · %s sidor", thread.ID, number(thread.Replies), number(thread.Views), pageCount(thread.PageCount))
+			if i == a.Cursor {
+				line = selected.Render(line)
+				meta = selectedMeta.Render(meta)
+			}
+			threadLines = append(threadLines, line, meta)
+		}
+	}
+
+	detail := []string{"Ingen tråd vald."}
+	if a.Cursor >= 0 && a.Cursor < len(a.Threads) {
+		thread := a.Threads[a.Cursor]
+		detail = []string{
+			clip(firstNonEmpty(thread.Title, "Tråd #"+thread.ID), rightWidth-2),
+			"",
+			"ID          #" + thread.ID,
+			"Svar        " + number(thread.Replies),
+			"Visningar   " + number(thread.Views),
+			"Sidor       " + pageCount(thread.PageCount),
+			"Författare   " + firstNonEmpty(thread.Author, "—"),
+			"Senast      " + firstNonEmpty(thread.LastPostAuthor, "—"),
+			"Tid         " + formatPostTime(thread.LastPostAt),
+			"",
+			muted.Render("Enter öppnar tråden"),
+		}
+	}
+
+	return joinPanels(
+		renderPanel("FORUMTRÄD", left, leftWidth),
+		renderPanel("TRÅDAR", threadLines, centerWidth),
+		renderPanel("DETALJER", detail, rightWidth),
+	)
+}
+
+func pageCount(value int) string {
+	if value < 1 {
+		return "—"
+	}
+	return number(value)
 }
 func renderPosts(xs []flashback.Post, c int) string {
 	var b strings.Builder

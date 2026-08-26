@@ -31,8 +31,10 @@ done
 build_cache amd64
 build_cache arm64
 
-cp deploy/install-backflash-windows.ps1 deploy/backflash-cache.service deploy/backflash-cache.toml.example deploy/install-backflash-cache-debian.sh "$out/"
+cp deploy/install-backflash-windows.ps1 deploy/backflash-cache.service deploy/backflash-cache.toml.example \
+  deploy/install-backflash-cache-debian.sh deploy/install-backflash-cache-release-debian.sh \
+  deploy/update-backflash-cache-debian.sh deploy/install-backflash-arch.sh "$out/"
 cp deploy/backflash-network.toml "$out/"
-cp docs/install-windows.md docs/cache-node-debian.md "$out/"
+cp docs/install-windows.md docs/install-arch.md docs/cache-node-debian.md "$out/"
 (cd "$out" && sha256sum * > SHA256SUMS)
 echo "release assets: $out"

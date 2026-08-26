@@ -225,6 +225,8 @@ func maxPage(s string) int {
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?i)^/t[0-9]+p([0-9]+)`),
 		regexp.MustCompile(`(?i)[?&/]p(?:age)?[=/]?([0-9]+)`),
+		regexp.MustCompile(`(?i)data-total-pages[[:space:]]*=[[:space:]]*["']([0-9]+)`),
+		regexp.MustCompile(`(?i)sidan[[:space:]]+[0-9]+[[:space:]]+av[[:space:]]+([0-9]+)`),
 	}
 	for _, re := range patterns {
 		for _, m := range re.FindAllStringSubmatch(s, -1) {
@@ -234,6 +236,31 @@ func maxPage(s string) int {
 			}
 		}
 	}
+	return max
+}
+
+// documentMaxPage reads the pagination metadata emitted on the first page.
+// Flashback has used both data-total-pages and visible "Sidan 1 av N"
+// indicators. This is intentionally scoped to pagination attributes/text,
+// rather than guessing a page count from the number of posts or replies.
+func documentMaxPage(doc *goquery.Document) int {
+	max := 1
+	doc.Find("[data-total-pages]").Each(func(_ int, s *goquery.Selection) {
+		pages, _ := strconv.Atoi(strings.TrimSpace(s.AttrOr("data-total-pages", "")))
+		if pages > max {
+			max = pages
+		}
+	})
+	doc.Find(".input-page-jump, .input-page-jump-xs, [class*='pagination'], nav").Each(func(_ int, s *goquery.Selection) {
+		if pages := maxPage(s.Text()); pages > max {
+			max = pages
+		}
+		if html, err := s.Html(); err == nil {
+			if pages := maxPage(html); pages > max {
+				max = pages
+			}
+		}
+	})
 	return max
 }
 
@@ -304,6 +331,9 @@ func ParseThreadPage(html, sourceURL, threadID string, page int) (ParsedPage, er
 		title = strings.TrimSuffix(title, " - Flashback Forum")
 	}
 	pageData := ParsedPage{ThreadID: threadID, Page: page, MaxPage: page, SourceURL: sourceURL, Title: title}
+	if pages := documentMaxPage(doc); pages > pageData.MaxPage {
+		pageData.MaxPage = pages
+	}
 	doc.Find(".post").Each(func(i int, post *goquery.Selection) {
 		id := postIDFromAttr(post.AttrOr("id", ""))
 		if id == "" {

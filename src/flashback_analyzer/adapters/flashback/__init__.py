@@ -1,1 +1,0 @@
-"""Flashback source adapter."""

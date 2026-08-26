@@ -90,6 +90,25 @@ func TestReaderUsesBoundedViewport(t *testing.T) {
 	}
 }
 
+func TestThreadWorkspaceShowsContextAndMetadata(t *testing.T) {
+	a := New(nil, nil)
+	a.Width = 120
+	a.CurrentView = ViewThreads
+	a.Stack = []flashback.ForumNode{{Title: "Dator och IT"}, {Title: "Retrospel"}}
+	a.Threads = []flashback.ThreadSummary{{ID: "123", Title: "En riktig tråd", Replies: 12, Views: 3456, PageCount: 7}}
+	view := a.View()
+	for _, want := range []string{"FORUMTRÄD", "Dator och IT", "TRÅDAR", "En riktig tråd", "#123", "12 svar", "3456 visningar", "7 sidor", "DETALJER"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("trådsvyn saknar %q: %s", want, view)
+		}
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if len([]rune(line)) > a.Width+2 {
+			t.Fatalf("trådsvyn överskrider terminalbredden: %q", line)
+		}
+	}
+}
+
 func TestGandrStartsLocked(t *testing.T) {
 	a := New(nil, nil)
 	if a.Gandr == nil {

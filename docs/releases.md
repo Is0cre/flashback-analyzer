@@ -15,23 +15,25 @@ Linux amd64/arm64.
 
 ## Uppdatera cache-servern
 
-När repot är publikt och en release finns kan servern uppdateras med GitHub
-CLI. Detta laddar bara ner vald asset; konfiguration och `/var/lib/backflash`
-ersätts inte.
+När repot är publikt behövs ingen GitHub-inloggning på cache-servern. Första
+installationen laddar ner rätt binär för serverns arkitektur, verifierar
+`SHA256SUMS` och skapar systemd-tjänsten. Konfiguration, mesh-identitet och
+`/var/lib/backflash` ersätts inte om de redan finns.
 
 ```bash
-gh release download v0.1.0 --repo Is0cre/flashback-analyzer --pattern 'backflash-cache-linux-amd64' --dir /tmp/backflash-update
+curl -fsSL https://github.com/Is0cre/flashback-analyzer/releases/download/v0.1.0-beta.2/install-backflash-cache-release-debian.sh \
+  -o /tmp/install-backflash-cache-release-debian.sh \
+  && sudo bash /tmp/install-backflash-cache-release-debian.sh v0.1.0-beta.2
 ```
 
-Verifiera checksumma och installera sedan:
+Efter det uppdateras servern med en enda hämtning av uppdateringsskriptet:
 
 ```bash
-cd /tmp/backflash-update && sha256sum -c <(curl -fsSL https://github.com/Is0cre/flashback-analyzer/releases/download/v0.1.0/SHA256SUMS | grep 'backflash-cache-linux-amd64')
+curl -fsSL https://github.com/Is0cre/flashback-analyzer/releases/download/v0.1.0-beta.2/update-backflash-cache-debian.sh \
+  -o /tmp/update-backflash-cache-debian.sh \
+  && sudo bash /tmp/update-backflash-cache-debian.sh v0.1.0-beta.2
 ```
 
-```bash
-sudo systemctl stop backflash-cache && sudo install -m 0755 backflash-cache-linux-amd64 /usr/local/bin/backflash-cache && sudo systemctl start backflash-cache && sudo systemctl status backflash-cache --no-pager
-```
-
-Privata meshidentiteter, konfiguration och cacheobjekt ligger kvar. Kontrollera
-alltid releaseversion och checksumma innan installation.
+Uppdateraren stoppar tjänsten, verifierar checksumma, sparar föregående binär
+och återställer den automatiskt om den nya versionen inte kan starta. Privata
+meshidentiteter, konfiguration och cacheobjekt ligger kvar.

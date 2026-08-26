@@ -100,7 +100,7 @@ func TestParseThreadListingSupportsFlashbackThreadsList(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("Flashback-listan gav %d rader, väntade 2: %#v", len(rows), rows)
 	}
-	if rows[0].Title != "Jag söker ett spel - RETRO-tråden" || rows[0].ID != "833642" || rows[0].Replies != 5546 || rows[0].Views != 554074 || !rows[0].Sticky {
+	if rows[0].Title != "Jag söker ett spel - RETRO-tråden" || rows[0].ID != "833642" || rows[0].Replies != 5546 || rows[0].Views != 554074 || rows[0].PageCount != 264 || !rows[0].Sticky {
 		t.Fatalf("första Flashback-tråden parsades fel: %#v", rows[0])
 	}
 	if rows[0].LastPostAuthor != "fearreaper" || rows[0].LastPostAt.IsZero() {

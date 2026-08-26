@@ -123,6 +123,16 @@ func ParseThreadListing(html, sourceURL, forumID string) ([]ThreadSummary, error
 			ts.LastPostAt = parseTime(findDateTime(text))
 		}
 		ts.PageCount = maxPage(row.Text())
+		// Flashback exposes the last-page number in a semantic thread
+		// pagination link such as /t1942341p264, not in visible row text.
+		row.Find("a[href]").Each(func(_ int, link *goquery.Selection) {
+			href := link.AttrOr("href", "")
+			if ClassifyURL(href, sourceURL) == LinkThread {
+				if pages := maxPage(href); pages > ts.PageCount {
+					ts.PageCount = pages
+				}
+			}
+		})
 		result = append(result, ts)
 	}
 	// Flashback has used more than one forum-list presentation. These are

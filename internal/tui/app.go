@@ -57,6 +57,7 @@ type dataMsg struct {
 	refreshURL    string
 	refreshParent string
 	page          int
+	pageCount     int
 	err           error
 }
 
@@ -135,6 +136,8 @@ type App struct {
 	Query              string
 	RemotePage         int
 	ForumPage          int
+	ReaderPage         int
+	ReaderMaxPage      int
 	Events             []external.ExternalEvent
 	EventDetail        *external.ExternalEvent
 	EventService       *service.ExternalEventsService
@@ -259,6 +262,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "posts":
 			a.Posts, a.CurrentView = m.posts, ViewReader
+			if m.page > 0 {
+				a.ReaderPage = m.page
+			}
+			if m.pageCount > 0 {
+				a.ReaderMaxPage = m.pageCount
+			}
 			if m.threadID != "" {
 				a.ThreadID = m.threadID
 			}
@@ -767,6 +776,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.Status = fmt.Sprintf("TRÅDAR · SIDA %d HÄMTAS…", a.ForumPage)
 				return a, refreshThreads(a.Store, a.Client, a.Stack[len(a.Stack)-1].URL, activeForum(a), a.ForumPage)
 			}
+			if a.CurrentView == ViewReader && a.ReaderPage < a.ReaderMaxPage {
+				a.ReaderPage++
+				a.Cursor = 0
+				a.Status = fmt.Sprintf("INLÄGG · SIDA %d HÄMTAS…", a.ReaderPage)
+				return a, loadThreadPage(a.Store, a.Client, a.ThreadID, a.ReaderPage)
+			}
 		case "[":
 			if a.CurrentView == ViewRemoteSearch && a.RemotePage > 1 {
 				a.RemotePage--
@@ -777,6 +792,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.Cursor = 0
 				a.Status = fmt.Sprintf("TRÅDAR · SIDA %d HÄMTAS…", a.ForumPage)
 				return a, refreshThreads(a.Store, a.Client, a.Stack[len(a.Stack)-1].URL, activeForum(a), a.ForumPage)
+			}
+			if a.CurrentView == ViewReader && a.ReaderPage > 1 {
+				a.ReaderPage--
+				a.Cursor = 0
+				a.Status = fmt.Sprintf("INLÄGG · SIDA %d HÄMTAS…", a.ReaderPage)
+				return a, loadThreadPage(a.Store, a.Client, a.ThreadID, a.ReaderPage)
 			}
 		case "esc":
 			a.Input.Blur()
@@ -949,6 +970,7 @@ func (a App) openSelected() (tea.Model, tea.Cmd) {
 			a.CurrentView = ViewReader
 			a.Cursor = 0
 			a.ThreadID, a.ThreadTitle = selected.ID, selected.Title
+			a.ReaderPage, a.ReaderMaxPage = 1, selected.PageCount
 			return a, loadPosts(a.Store, a.Client, selected.ID, a.MeshRuntime)
 		}
 	case ViewRemoteSearch:
@@ -994,6 +1016,9 @@ func (a App) View() string {
 			context = "tråd " + a.ThreadID
 		}
 		b.WriteString(viewHeading("INLÄGG", context))
+		if a.ReaderMaxPage > 0 {
+			b.WriteString("  " + metadata.Render(fmt.Sprintf("· SIDA %d / %d · [/] byt sida", a.ReaderPage, a.ReaderMaxPage)))
+		}
 		b.WriteString("\n\n")
 		if a.PostViewportReady {
 			b.WriteString(a.PostViewport.View())
@@ -2492,8 +2517,9 @@ func loadPosts(s *store.Store, c *flashback.Client, id string, meshRuntime *mesh
 		finish := diagnostics.Start("thread.posts")
 		defer finish()
 		threadTitle := ""
+		pageCount := 0
 		if s != nil {
-			_ = s.DB.QueryRow(`SELECT title FROM threads WHERE id=?`, id).Scan(&threadTitle)
+			_ = s.DB.QueryRow(`SELECT title,page_count FROM threads WHERE id=?`, id).Scan(&threadTitle, &pageCount)
 		}
 		rows, e := s.Posts(id)
 		if e == nil {
@@ -2507,7 +2533,7 @@ func loadPosts(s *store.Store, c *flashback.Client, id string, meshRuntime *mesh
 				}
 			}
 			if len(out) > 0 {
-				return dataMsg{kind: "posts", posts: out, threadID: id, threadTitle: threadTitle}
+				return dataMsg{kind: "posts", posts: out, threadID: id, threadTitle: threadTitle, page: 1, pageCount: pageCount}
 			}
 		}
 		p, e := c.Thread(context.Background(), id, 1)
@@ -2519,7 +2545,7 @@ func loadPosts(s *store.Store, c *flashback.Client, id string, meshRuntime *mesh
 					_ = meshRuntime.PutLocal(object)
 				}
 			}
-			return dataMsg{kind: "posts", posts: p.Posts, threadID: id, threadTitle: firstNonEmpty(p.Title, threadTitle)}
+			return dataMsg{kind: "posts", posts: p.Posts, threadID: id, threadTitle: firstNonEmpty(p.Title, threadTitle), page: 1, pageCount: p.MaxPage}
 		}
 		if meshRuntime != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -2528,11 +2554,26 @@ func loadPosts(s *store.Store, c *flashback.Client, id string, meshRuntime *mesh
 				var cached flashback.ParsedPage
 				if decodeErr := json.Unmarshal(object.Payload, &cached); decodeErr == nil {
 					_ = s.SavePage(cached)
-					return dataMsg{kind: "posts", posts: cached.Posts, threadID: id, threadTitle: firstNonEmpty(cached.Title, threadTitle)}
+					return dataMsg{kind: "posts", posts: cached.Posts, threadID: id, threadTitle: firstNonEmpty(cached.Title, threadTitle), page: 1, pageCount: cached.MaxPage}
 				}
 			}
 		}
 		return dataMsg{kind: "posts", posts: p.Posts, threadID: id, threadTitle: threadTitle, err: e}
+	}
+}
+
+func loadThreadPage(s *store.Store, c *flashback.Client, id string, page int) tea.Cmd {
+	return func() tea.Msg {
+		parsed, err := c.Thread(context.Background(), id, page)
+		if err != nil {
+			return dataMsg{kind: "posts", threadID: id, page: page, err: err}
+		}
+		if s != nil {
+			if err := s.SavePage(parsed); err != nil {
+				return dataMsg{kind: "posts", threadID: id, page: page, err: err}
+			}
+		}
+		return dataMsg{kind: "posts", posts: parsed.Posts, threadID: id, page: page, pageCount: parsed.MaxPage, threadTitle: parsed.Title}
 	}
 }
 

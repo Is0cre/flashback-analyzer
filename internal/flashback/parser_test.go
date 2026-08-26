@@ -158,3 +158,12 @@ func TestParseThreadPageReadsTotalPagesFromFirstPageMetadata(t *testing.T) {
 		t.Fatalf("first-page pagination metadata was not parsed: got %d, want 42", page.MaxPage)
 	}
 }
+
+func TestForumPageURLPreservesFlashbackForumSlug(t *testing.T) {
+	if got := ForumPageURL("https://www.flashback.org/f445-cykel-60823", 2); got != "https://www.flashback.org/f445p2-cykel-60823" {
+		t.Fatalf("forum pagination URL fel: %q", got)
+	}
+	if got := ForumPageURL("https://www.flashback.org/f445", 3); got != "https://www.flashback.org/f445p3" {
+		t.Fatalf("forum pagination URL utan slug fel: %q", got)
+	}
+}

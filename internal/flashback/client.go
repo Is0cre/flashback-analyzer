@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -57,11 +58,40 @@ func (c *Client) Forum(ctx context.Context, rawURL string) ([]ForumNode, error) 
 }
 
 func (c *Client) Threads(ctx context.Context, forum ForumNode) ([]ThreadSummary, error) {
-	body, err := c.Fetch(ctx, forum.URL)
+	return c.ThreadsPage(ctx, forum, 1)
+}
+
+// ThreadsPage follows Flashback's forum pagination format: /f<ID>p2 and,
+// when a slug is present, /f<ID>p2-slug. The slug is retained because it is
+// part of the normal browsable URL emitted by Flashback.
+func (c *Client) ThreadsPage(ctx context.Context, forum ForumNode, page int) ([]ThreadSummary, error) {
+	rawURL := forum.URL
+	if page > 1 {
+		rawURL = ForumPageURL(rawURL, page)
+	}
+	body, err := c.Fetch(ctx, rawURL)
 	if err != nil {
 		return nil, err
 	}
-	return ParseThreadListing(string(body), forum.URL, forum.ID)
+	return ParseThreadListing(string(body), rawURL, forum.ID)
+}
+
+var forumPathPattern = regexp.MustCompile(`(?i)(/f[0-9]+)(p[0-9]+)?(-[^/?#]*)?$`)
+
+func ForumPageURL(rawURL string, page int) string {
+	if page <= 1 {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	m := forumPathPattern.FindStringSubmatch(u.Path)
+	if len(m) != 4 {
+		return rawURL
+	}
+	u.Path = m[1] + "p" + strconv.Itoa(page) + m[3]
+	return u.String()
 }
 
 // ForumPage parses one fetched forum page in both semantic contexts. Forum

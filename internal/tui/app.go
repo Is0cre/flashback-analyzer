@@ -56,6 +56,7 @@ type dataMsg struct {
 	refresh       bool
 	refreshURL    string
 	refreshParent string
+	page          int
 	err           error
 }
 
@@ -133,6 +134,7 @@ type App struct {
 	SearchRemote       bool
 	Query              string
 	RemotePage         int
+	ForumPage          int
 	Events             []external.ExternalEvent
 	EventDetail        *external.ExternalEvent
 	EventService       *service.ExternalEventsService
@@ -192,7 +194,7 @@ func New(s *store.Store, c *flashback.Client) App {
 	eventService := &service.ExternalEventsService{Store: s, Provider: eventClient, RefreshAfter: 2 * time.Minute, Now: time.Now}
 	meshConfig := mesh.Load()
 	dashboard := &service.DashboardService{Store: s, Now: time.Now, MeshConfigured: meshConfig.Enabled}
-	return App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1, EventService: eventService, DashboardSvc: dashboard, Gandr: gandr.New(), MeshRuntime: meshruntime.New(meshConfig), PostViewport: viewport.New(20, 6)}
+	return App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1, ForumPage: 1, EventService: eventService, DashboardSvc: dashboard, Gandr: gandr.New(), MeshRuntime: meshruntime.New(meshConfig), PostViewport: viewport.New(20, 6)}
 }
 
 func Splash(w io.Writer, width int) {
@@ -242,6 +244,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "threads":
 			a.Threads, a.CurrentView = m.threads, ViewThreads
+			if m.page > 0 {
+				a.ForumPage = m.page
+			}
 			if len(m.threads) == 0 {
 				a.Status = "INGA TRÅDAR · tryck r för att hämta igen"
 			}
@@ -250,7 +255,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if target == "" {
 					target = flashback.BaseURL
 				}
-				return a, refreshThreads(a.Store, a.Client, target, activeForum(a))
+				return a, refreshThreads(a.Store, a.Client, target, activeForum(a), a.ForumPage)
 			}
 		case "posts":
 			a.Posts, a.CurrentView = m.posts, ViewReader
@@ -749,17 +754,29 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if a.CurrentView == ViewThreads && len(a.Stack) > 0 {
 				a.Status = "TRÅDAR · HÄMTAR…"
-				return a, refreshThreads(a.Store, a.Client, a.Stack[len(a.Stack)-1].URL, activeForum(a))
+				return a, refreshThreads(a.Store, a.Client, a.Stack[len(a.Stack)-1].URL, activeForum(a), a.ForumPage)
 			}
 		case "]":
 			if a.CurrentView == ViewRemoteSearch {
 				a.RemotePage++
 				return a, remoteSearch(a.Client, a.Query, a.RemotePage)
 			}
+			if a.CurrentView == ViewThreads && len(a.Stack) > 0 {
+				a.ForumPage++
+				a.Cursor = 0
+				a.Status = fmt.Sprintf("TRÅDAR · SIDA %d HÄMTAS…", a.ForumPage)
+				return a, refreshThreads(a.Store, a.Client, a.Stack[len(a.Stack)-1].URL, activeForum(a), a.ForumPage)
+			}
 		case "[":
 			if a.CurrentView == ViewRemoteSearch && a.RemotePage > 1 {
 				a.RemotePage--
 				return a, remoteSearch(a.Client, a.Query, a.RemotePage)
+			}
+			if a.CurrentView == ViewThreads && a.ForumPage > 1 && len(a.Stack) > 0 {
+				a.ForumPage--
+				a.Cursor = 0
+				a.Status = fmt.Sprintf("TRÅDAR · SIDA %d HÄMTAS…", a.ForumPage)
+				return a, refreshThreads(a.Store, a.Client, a.Stack[len(a.Stack)-1].URL, activeForum(a), a.ForumPage)
 			}
 		case "esc":
 			a.Input.Blur()
@@ -917,6 +934,7 @@ func (a App) openSelected() (tea.Model, tea.Cmd) {
 			n := a.Forums[a.Cursor]
 			a.Stack = append(a.Stack, n)
 			a.Cursor = 0
+			a.ForumPage = 1
 			// The persisted has_children bit is only a rendering hint. Flashback
 			// has many forum levels and templates do not always expose that fact
 			// on the parent link. Inspect the selected forum page itself; the
@@ -1346,8 +1364,14 @@ func renderNodes(xs []flashback.ForumNode, c int) string {
 	return b.String()
 }
 func renderThreads(xs []flashback.ThreadSummary, c int) string {
+	return renderThreadsAtWidth(xs, c, 120)
+}
+func renderThreadsAtWidth(xs []flashback.ThreadSummary, c, width int) string {
 	if len(xs) == 0 {
 		return muted.Render("Ingen trådlista finns lokalt ännu.")
+	}
+	if width < 32 {
+		width = 32
 	}
 	var b strings.Builder
 	for i, n := range xs {
@@ -1355,11 +1379,11 @@ func renderThreads(xs []flashback.ThreadSummary, c int) string {
 		if n.Sticky {
 			prefix = "📌 " + prefix
 		}
-		line := prefix + firstNonEmpty(n.Title, "Tråd #"+n.ID)
+		line := prefix + clip(firstNonEmpty(n.Title, "Tråd #"+n.ID), width-lipgloss.Width(prefix))
 		if i == c {
 			line = selected.Render(line)
 		}
-		meta := fmt.Sprintf("      #%s · %s svar · %s visningar · %s sidor", n.ID, number(n.Replies), number(n.Views), pageCount(n.PageCount))
+		meta := clip(fmt.Sprintf("      #%s · %s svar · %s visningar · %s sidor", n.ID, number(n.Replies), number(n.Views), pageCount(n.PageCount)), width)
 		if i == c {
 			meta = selectedMeta.Render(meta)
 		}
@@ -1377,7 +1401,8 @@ func renderThreadWorkspace(a App) string {
 		width = 120
 	}
 	if width < 100 {
-		return renderThreads(a.Threads, a.Cursor)
+		content := "SIDA " + number(a.ForumPage) + " · [/] föregående/nästa\n" + renderThreadsAtWidth(a.Threads, a.Cursor, width-4)
+		return lipgloss.NewStyle().Width(width-2).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("238")).Padding(0, 1).Render(content)
 	}
 
 	leftWidth, rightWidth := 27, 39
@@ -1438,7 +1463,7 @@ func renderThreadWorkspace(a App) string {
 
 	return joinPanels(
 		renderPanel("FORUMTRÄD", left, leftWidth),
-		renderPanel("TRÅDAR", threadLines, centerWidth),
+		renderPanel(fmt.Sprintf("TRÅDAR · SIDA %d · [/] FÖREGÅENDE/NÄSTA", a.ForumPage), threadLines, centerWidth),
 		renderPanel("DETALJER", detail, rightWidth),
 	)
 }
@@ -2448,10 +2473,10 @@ func loadForum(s *store.Store, c *flashback.Client, n flashback.ForumNode) tea.C
 	}
 }
 
-func refreshThreads(s *store.Store, c *flashback.Client, rawURL, forumID string) tea.Cmd {
+func refreshThreads(s *store.Store, c *flashback.Client, rawURL, forumID string, page int) tea.Cmd {
 	return func() tea.Msg {
 		forum := flashback.ForumNode{ID: forumID, URL: rawURL}
-		threads, err := c.Threads(context.Background(), forum)
+		threads, err := c.ThreadsPage(context.Background(), forum, page)
 		if err != nil {
 			return dataMsg{kind: "threads", err: err}
 		}
@@ -2459,7 +2484,7 @@ func refreshThreads(s *store.Store, c *flashback.Client, rawURL, forumID string)
 			return dataMsg{kind: "threads", err: err}
 		}
 		_ = s.SetExternalSyncState(external.SyncState{Source: "flashback:threads:" + forumID, LastSyncedAt: time.Now(), Status: "ok"})
-		return dataMsg{kind: "threads", threads: threads}
+		return dataMsg{kind: "threads", threads: threads, page: page}
 	}
 }
 func loadPosts(s *store.Store, c *flashback.Client, id string, meshRuntime *meshruntime.Runtime) tea.Cmd {

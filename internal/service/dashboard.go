@@ -17,6 +17,11 @@ type HotThread struct {
 // DashboardSnapshot is assembled before rendering. View() must remain a pure
 // presentation function: no SQL, network, Gandr vault, or mesh startup lives
 // in the render path.
+//
+// There is deliberately no Gandr field here: this service is outside
+// GANDR's private boundary and has no way to know whether the vault is
+// unlocked. The TUI layer holds *gandr.Subsystem directly and reads its
+// live in-memory state at render time instead.
 type DashboardSnapshot struct {
 	ForumCount    int
 	ThreadCount   int
@@ -37,7 +42,6 @@ type DashboardSnapshot struct {
 	MeshObjects   int
 	MeshRX        uint64
 	MeshTX        uint64
-	Gandr         string
 }
 
 type DashboardService struct {
@@ -99,6 +103,5 @@ SELECT
 		out.Mesh = "AV"
 	}
 	out.MeshSharing = "AV"
-	out.Gandr = "LÅST"
 	return out, nil
 }

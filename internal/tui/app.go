@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/backflash-cli/backflash/internal/diagnostics"
 	"github.com/backflash-cli/backflash/internal/external"
@@ -24,6 +26,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 //go:embed assets/backflash.ans
@@ -111,25 +114,30 @@ type gandrGroupMsg struct {
 	groups   []gandr.PrivateGroup
 	active   *[32]byte
 	messages []gandr.PrivateGroupMessage
+	invite   string
 	err      error
 }
 
 type meshTickMsg struct{}
 type gandrPeerTickMsg struct{}
 type App struct {
-	Store              *store.Store
-	Client             *flashback.Client
-	CurrentView        View
-	Width              int
-	Height             int
-	Forums             []flashback.ForumNode
-	Threads            []flashback.ThreadSummary
-	Posts              []flashback.Post
-	ThreadID           string
-	ThreadTitle        string
-	Results            []flashback.SearchResult
-	Stack              []flashback.ForumNode
-	Cursor             int
+	Store       *store.Store
+	Client      *flashback.Client
+	CurrentView View
+	Width       int
+	Height      int
+	Forums      []flashback.ForumNode
+	Threads     []flashback.ThreadSummary
+	Posts       []flashback.Post
+	ThreadID    string
+	ThreadTitle string
+	Results     []flashback.SearchResult
+	Stack       []flashback.ForumNode
+	Cursor      int
+	// Cursor is the position inside the current view. ThreadCursor remains
+	// fixed while reading posts so the middle panel keeps the opened thread
+	// selected when j/k moves through the reader.
+	ThreadCursor       int
 	Status             string
 	Input              textinput.Model
 	SearchRemote       bool
@@ -159,6 +167,11 @@ type App struct {
 	GandrAddMode       bool
 	GandrGroups        []gandr.PrivateGroup
 	GandrActiveGroup   *[32]byte
+	// GandrUnlockGroupID is set when the input is focused specifically to
+	// unlock this locked group (from clicking it), as opposed to any other
+	// use of the input field — the next Enter is treated as that group's
+	// password rather than a chat message or slash command.
+	GandrUnlockGroupID *[32]byte
 	GandrGroupMessages map[[32]byte][]gandr.PrivateGroupMessage
 	GandrRightCursor   int
 	MeshRuntime        *meshruntime.Runtime
@@ -169,25 +182,51 @@ type App struct {
 	PostViewportReady  bool
 }
 
+// Palette: deliberately small and consistent — one color per meaning, reused
+// identically across Flashback, GANDR and backflash-cache (see
+// internal/cacheui/app.go), so the same hue always means the same thing no
+// matter which view or binary you're in. No pink/purple, and every color is
+// pulled down a shade from a "loud" default: warning/critical/accent/online
+// are muted rather than neon so nothing competes for attention on its own —
+// severity is read from hue + bold + the accompanying glyph/label, not from
+// brightness. accent and warning are deliberately distinct hues (they used
+// to collide on the same orange, making a keybinding hint look like an
+// active warning).
 var (
-	brand        = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-	accent       = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
-	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("81"))
-	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("141"))
-	muted        = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	metadata     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	online       = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
-	warning      = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	critical     = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
-	selected     = lipgloss.NewStyle().Foreground(lipgloss.Color("232")).Background(lipgloss.Color("81")).Bold(true)
-	selectedMeta = lipgloss.NewStyle().Foreground(lipgloss.Color("235")).Background(lipgloss.Color("81"))
-	pinStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	brand        = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)  // app title/logo — sky blue
+	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("81"))  // view headings — cyan
+	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("67"))  // panel sub-headers — steel blue
+	accent       = lipgloss.NewStyle().Foreground(lipgloss.Color("215")).Bold(true) // interactive hints (keybindings) — peach
+	muted        = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))            // de-emphasized text — grey
+	metadata     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))            // secondary metadata — light grey
+	online       = lipgloss.NewStyle().Foreground(lipgloss.Color("108")).Bold(true) // success/ok — sage green
+	warning      = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))            // degraded/caution — muted gold
+	critical     = lipgloss.NewStyle().Foreground(lipgloss.Color("167")).Bold(true) // error/danger — muted brick red
+	strong       = lipgloss.NewStyle().Bold(true)                                   // emphasis without forcing a hue (thread/post titles)
+	selected     = lipgloss.NewStyle().Foreground(lipgloss.Color("232")).Background(lipgloss.Color("31")).Bold(true)
+	selectedMeta = lipgloss.NewStyle().Foreground(lipgloss.Color("235")).Background(lipgloss.Color("31"))
+	pinStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("215"))
+	linkStyle    = titleStyle.Underline(true) // URLs in post text — cyan+underline, the conventional "this is a link" signal
 )
+
+var urlPattern = regexp.MustCompile(`https?://[^\s]+`)
+
+// highlightURLs styles URLs found in post text so they stand out from
+// surrounding prose without needing to read every word to spot them.
+// Trailing punctuation (sentence periods, closing parens/quotes the poster
+// wrapped the URL in) is excluded from the styled span so it doesn't look
+// like part of the link.
+func highlightURLs(text string) string {
+	return urlPattern.ReplaceAllStringFunc(text, func(match string) string {
+		trimmed := strings.TrimRight(match, ".,;:!?)]}'\"")
+		return linkStyle.Render(trimmed) + match[len(trimmed):]
+	})
+}
 
 // Bump this when the persisted navigation shape/parser changes. It causes
 // one background refresh instead of trusting a snapshot written by the old
 // flat-root bug.
-const navigationSource = "flashback:navigation:v3"
+const navigationSource = "flashback:navigation:v6-sitemap-parent-ancestors"
 
 func New(s *store.Store, c *flashback.Client) App {
 	input := textinput.New()
@@ -407,13 +446,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.GandrGroups = m.groups
 			a.GandrActiveGroup = m.active
-			if m.active != nil {
+			// m.messages is only populated by the commands that actually
+			// fetch it (skapa/öppna); a nil check here keeps /grupp bjud
+			// (which reuses this same message to report its invite string)
+			// from wiping an already-loaded conversation back to empty.
+			if m.active != nil && m.messages != nil {
 				if a.GandrGroupMessages == nil {
 					a.GandrGroupMessages = make(map[[32]byte][]gandr.PrivateGroupMessage)
 				}
 				a.GandrGroupMessages[*m.active] = m.messages
 			}
-			a.Status = "GANDR · privat grupp · krypterad lokalt"
+			if m.invite != "" {
+				a.Status = "GANDR · inbjudan (delas som lösenordet, inte publikt): " + m.invite
+			} else {
+				a.Status = "GANDR · privat grupp · krypterad lokalt"
+			}
 		}
 	case gandrChannelsMsg:
 		if m.err != nil {
@@ -553,11 +600,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						a.GandrAddMode = false
 						return a, addGandrContact(a.GandrSession, strings.TrimSpace(strings.TrimPrefix(q, "/add ")))
 					}
+					if a.GandrUnlockGroupID != nil {
+						id := *a.GandrUnlockGroupID
+						a.GandrUnlockGroupID = nil
+						// Takes the password directly instead of building a
+						// "/grupp öppna ID LÖSENORD" string: that command is
+						// space-delimited, so a password containing a space
+						// would silently be cut short if routed through it.
+						return a, unlockAndOpenGandrGroup(a.GandrSession, id, raw)
+					}
 					if q == "" || a.GandrSession == nil {
 						return a, nil
 					}
 					if strings.HasPrefix(q, "/grupp") {
-						return a, gandrGroupCommand(a.GandrSession, q)
+						return a, gandrGroupCommand(a.GandrSession, a.GandrActiveGroup, q)
 					}
 					if strings.HasPrefix(q, "/join ") {
 						return a, gandrJoin(a.GandrSession, strings.TrimSpace(strings.TrimPrefix(q, "/join ")))
@@ -604,7 +660,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "ctrl+c", "q":
 			if a.CurrentView != ViewOverview {
-				closeGandrSession(&a)
+				// Leaving GANDR must not close the active session — once
+				// unlocked, it stays connected in the background so
+				// returning to GANDR later does not require the password
+				// again. Only explicit lock/delete actions close it.
 				a.CurrentView, a.Cursor, a.EventDetail = ViewOverview, 0, nil
 				a.Input.Blur()
 				a.GandrCreating, a.GandrConfirming, a.GandrPassphrase = false, false, ""
@@ -612,13 +671,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return a, tea.Quit
 		case "home", "h":
-			closeGandrSession(&a)
 			a.CurrentView, a.Cursor, a.EventDetail = ViewOverview, 0, nil
 			a.Input.Blur()
 			a.GandrCreating, a.GandrConfirming, a.GandrPassphrase = false, false, ""
 			return a, loadDashboard(a.DashboardSvc)
 		case "f":
-			a.CurrentView, a.Cursor = ViewForums, 0
+			// "f" always jumps to the forum root, like "h" jumps to the
+			// dashboard. The breadcrumb Stack must be cleared here too, or
+			// leftover entries from an earlier browse session corrupt the
+			// forum path shown once the user descends again.
+			a.CurrentView, a.Cursor, a.Stack = ViewForums, 0, nil
 			return a, loadRoot(a.Store, a.Client)
 		case "t":
 			a.CurrentView, a.Status = ViewOverview, "SPARADE TRÅDAR · lokal data"
@@ -630,7 +692,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.CurrentView, a.Cursor = ViewMesh, 0
 			return a, nil
 		case "g":
-			a.CurrentView, a.Cursor = ViewGandr, 0
+			a.Cursor = 0
+			if a.GandrSession != nil {
+				// The session survived the earlier navigation away from
+				// GANDR (see "q"/"home" above), so it is still unlocked and
+				// connected — go straight back into the chat instead of
+				// re-prompting for the password.
+				a.CurrentView = ViewGandrChat
+				return a, nil
+			}
+			a.CurrentView = ViewGandr
 			a.GandrCreating, a.GandrConfirming, a.GandrPassphrase = false, false, ""
 			a.Input.SetValue("")
 			a.Input.EchoMode = textinput.EchoPassword
@@ -673,6 +744,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "b":
 			if a.CurrentView == ViewGandrChat {
+				// "b" only ever meant "back up a level" everywhere else in
+				// the app; inside a private group it did nothing, so there
+				// was no way to leave one once opened. Closing the group
+				// here mirrors what "/grupp stäng" already did, just
+				// discoverable without knowing the slash command exists.
+				if a.GandrActiveGroup != nil {
+					a.GandrActiveGroup = nil
+					a.Status = "GANDR · lämnade den privata gruppen"
+				}
 				return a, nil
 			}
 			if len(a.Stack) > 0 {
@@ -768,7 +848,41 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.Status = "TRÅDAR · HÄMTAR…"
 				return a, refreshThreads(a.Store, a.Client, a.Stack[len(a.Stack)-1].URL, activeForum(a), a.ForumPage)
 			}
-		case "]":
+		case "f5":
+			// Only set the "updating" status on a view that actually starts a
+			// refresh command below. Views with no case here (Gandr, mesh,
+			// remote search, ...) or a ViewThreads with an empty Stack must
+			// leave a.Status untouched instead of getting stuck on a message
+			// that no in-flight command will ever clear.
+			switch a.CurrentView {
+			case ViewOverview:
+				a.Status = "UPPDATERAR · hämtar aktuell vy…"
+				return a, tea.Batch(loadDashboard(a.DashboardSvc), loadCachedEvents(a.EventService))
+			case ViewForums:
+				if len(a.Stack) == 0 {
+					a.Status = "UPPDATERAR · hämtar aktuell vy…"
+					return a, refreshNavigation(a.Store, a.Client, flashback.BaseURL)
+				}
+				current := a.Stack[len(a.Stack)-1]
+				a.Status = "UPPDATERAR · hämtar aktuell vy…"
+				if isCategory(current) {
+					return a, refreshCategoryNavigation(a.Store, a.Client, current)
+				}
+				return a, refreshForumNavigation(a.Store, a.Client, current.URL, current.ID)
+			case ViewThreads:
+				if len(a.Stack) > 0 {
+					current := a.Stack[len(a.Stack)-1]
+					a.Status = "UPPDATERAR · hämtar aktuell vy…"
+					return a, refreshThreads(a.Store, a.Client, current.URL, current.ID, a.ForumPage)
+				}
+			case ViewReader:
+				a.Status = "UPPDATERAR · hämtar aktuell vy…"
+				return a, loadThreadPage(a.Store, a.Client, a.ThreadID, a.ReaderPage)
+			case ViewExternalEvents:
+				a.Status = "UPPDATERAR · hämtar aktuell vy…"
+				return a, refreshEvents(a.EventService)
+			}
+		case "]", "right":
 			if a.CurrentView == ViewRemoteSearch {
 				a.RemotePage++
 				return a, remoteSearch(a.Client, a.Query, a.RemotePage)
@@ -785,7 +899,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.Status = fmt.Sprintf("INLÄGG · SIDA %d HÄMTAS…", a.ReaderPage)
 				return a, loadThreadPage(a.Store, a.Client, a.ThreadID, a.ReaderPage)
 			}
-		case "[":
+		case "[", "left":
 			if a.CurrentView == ViewRemoteSearch && a.RemotePage > 1 {
 				a.RemotePage--
 				return a, remoteSearch(a.Client, a.Query, a.RemotePage)
@@ -807,28 +921,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.MouseMsg:
 		if a.CurrentView == ViewGandrChat && m.Action == tea.MouseActionPress && m.Button == tea.MouseButtonLeft {
-			// Header occupies rows 0–3; the channel list starts on row 6.
-			if m.X < 26 && m.Y >= 6 && m.Y < 6+len(a.GandrChannels) {
-				a.Cursor = m.Y - 6
-				return a, nil
-			}
-			if m.X < 26 && m.Y == 9+len(a.GandrChannels) && a.GandrSession != nil {
-				a.Input.SetValue("/join ")
-				a.Input.EchoMode = textinput.EchoNormal
-				a.Input.Placeholder = "KANALNAMN"
-				a.Input.Focus()
-				return a, nil
-			}
-			if m.X < 26 && m.Y == 10+len(a.GandrChannels) && a.GandrSession != nil {
-				a.Input.SetValue("/grupp skapa ")
-				a.Input.EchoMode = textinput.EchoNormal
-				a.Input.Placeholder = "NAMN LÖSENORD"
-				a.Input.Focus()
-				return a, nil
-			}
-			if m.X < 26 && m.Y == 11+len(a.GandrChannels) && a.Gandr != nil && a.Gandr.HasVault() {
-				beginGandrDelete(&a, false)
-				return a, nil
+			sidebarWidth := gandrSidebarWidth(a)
+			// The header (title + blank line) and the panel's own top
+			// border/title/separator occupy 4 screen rows before the
+			// sidebar's first content line (gandrSidebarRows index 0).
+			const gandrSidebarScreenOffset = 4
+			_, actions := gandrSidebarRows(a, sidebarWidth)
+			if m.X < sidebarWidth+2 {
+				if row := m.Y - gandrSidebarScreenOffset; row >= 0 && row < len(actions) {
+					return gandrHandleSidebarClick(a, actions[row])
+				}
 			}
 			if a.Width >= 100 && m.X >= a.Width-30 && m.Y >= 6 {
 				contactIndex := (m.Y - 6) / 2
@@ -845,11 +947,66 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return a, nil
 				}
 			}
-			if m.Y >= 6+len(a.GandrChannels) && a.GandrSession != nil {
+			if m.Y >= gandrSidebarScreenOffset+len(actions) && a.GandrSession != nil {
 				a.Input.EchoMode = textinput.EchoNormal
 				a.Input.Placeholder = "Meddelande eller /join kanal"
 				a.Input.Focus()
 			}
+		}
+	}
+	return a, nil
+}
+
+// gandrHandleSidebarClick dispatches a click on one of the sidebar rows
+// produced by gandrSidebarRows. Kept separate from the MouseMsg case so the
+// (line, action) pairing and its dispatch logic sit next to each other.
+func gandrHandleSidebarClick(a App, action gandrSidebarAction) (tea.Model, tea.Cmd) {
+	switch action.Kind {
+	case gandrActionSelectChannel:
+		a.Cursor = action.Index
+	case gandrActionJoinChannel:
+		if a.GandrSession != nil {
+			a.Input.SetValue("/join ")
+			a.Input.EchoMode = textinput.EchoNormal
+			a.Input.Placeholder = "KANALNAMN"
+			a.Input.Focus()
+		}
+	case gandrActionLeaveChannel:
+		if a.GandrSession != nil && len(a.GandrChannels) > 0 {
+			channel := a.GandrChannels[min(a.Cursor, len(a.GandrChannels)-1)]
+			return a, gandrLeave(a.GandrSession, channel.ID)
+		}
+	case gandrActionCreateGroup:
+		if a.GandrSession != nil {
+			a.Input.SetValue("/grupp skapa ")
+			a.Input.EchoMode = textinput.EchoNormal
+			a.Input.Placeholder = "NAMN LÖSENORD"
+			a.Input.Focus()
+		}
+	case gandrActionDeleteVault:
+		if a.Gandr != nil && a.Gandr.HasVault() {
+			beginGandrDelete(&a, false)
+		}
+	case gandrActionListGroups:
+		if a.GandrSession != nil {
+			return a, gandrGroupCommand(a.GandrSession, a.GandrActiveGroup, "/grupp lista")
+		}
+	case gandrActionOpenGroup:
+		if a.GandrSession == nil || action.Index < 0 || action.Index >= len(a.GandrGroups) {
+			break
+		}
+		group := a.GandrGroups[action.Index]
+		switch {
+		case a.GandrActiveGroup != nil && *a.GandrActiveGroup == group.ID:
+			// Already open — nothing to do.
+		case a.GandrSession.IsGroupUnlocked(group.ID):
+			return a, openGandrGroup(a.GandrSession, group.ID)
+		default:
+			a.GandrUnlockGroupID = &group.ID
+			a.Input.SetValue("")
+			a.Input.EchoMode = textinput.EchoPassword
+			a.Input.Placeholder = "LÖSENORD för " + group.Name
+			a.Input.Focus()
 		}
 	}
 	return a, nil
@@ -939,8 +1096,12 @@ func (a App) itemCount() int {
 	return 0
 }
 func activeThread(a App) string {
-	if len(a.Threads) > 0 && a.Cursor < len(a.Threads) {
-		return a.Threads[a.Cursor].ID
+	cursor := a.Cursor
+	if a.CurrentView == ViewReader {
+		cursor = a.ThreadCursor
+	}
+	if len(a.Threads) > 0 && cursor >= 0 && cursor < len(a.Threads) {
+		return a.Threads[cursor].ID
 	}
 	return ""
 }
@@ -970,6 +1131,7 @@ func (a App) openSelected() (tea.Model, tea.Cmd) {
 	case ViewThreads:
 		if a.Cursor < len(a.Threads) {
 			selected := a.Threads[a.Cursor]
+			a.ThreadCursor = a.Cursor
 			a.CurrentView = ViewReader
 			a.Cursor = 0
 			a.ThreadID, a.ThreadTitle = selected.ID, selected.Title
@@ -979,6 +1141,7 @@ func (a App) openSelected() (tea.Model, tea.Cmd) {
 	case ViewRemoteSearch:
 		if a.Cursor < len(a.Results) {
 			r := a.Results[a.Cursor]
+			a.ThreadCursor = -1
 			a.CurrentView = ViewReader
 			a.Status = "TRÅD HÄMTAS…"
 			a.ThreadID, a.ThreadTitle = r.ThreadID, r.Title
@@ -1001,7 +1164,9 @@ func (a App) View() string {
 	} else {
 		b.WriteString(brand.Render("BACKFLASH // DISKURS-NOC"))
 	}
-	b.WriteString("\n\n")
+	// Keep the shell compact: one breathing line below the header and one
+	// above the footer is enough on short terminals.
+	b.WriteString("\n")
 	switch a.CurrentView {
 	case ViewOverview:
 		b.WriteString(renderDashboard(a))
@@ -1020,10 +1185,12 @@ func (a App) View() string {
 		}
 		b.WriteString(viewHeading("INLÄGG", context))
 		if a.ReaderMaxPage > 0 {
-			b.WriteString("  " + metadata.Render(fmt.Sprintf("· SIDA %d / %d · [/] byt sida", a.ReaderPage, a.ReaderMaxPage)))
+			b.WriteString("  " + metadata.Render(fmt.Sprintf("· SIDA %d / %d · ◀/▶ byt sida", a.ReaderPage, a.ReaderMaxPage)))
 		}
 		b.WriteString("\n\n")
-		if a.PostViewportReady {
+		if a.Width >= 100 {
+			b.WriteString(renderReaderWorkspace(a))
+		} else if a.PostViewportReady {
 			b.WriteString(a.PostViewport.View())
 		} else {
 			b.WriteString(renderPosts(a.Posts, a.Cursor))
@@ -1035,11 +1202,17 @@ func (a App) View() string {
 	case ViewExternalEvents:
 		b.WriteString(viewHeading("POLISHÄNDELSER", "POLISEN · PUBLIK KÄLLA"))
 		b.WriteString("\n\n")
-		b.WriteString(renderPoliceMap(a.Events, a.Width))
+		// Reserve a fixed overhead for headers/legend/footer and give the
+		// map the rest of the terminal height (capped so it doesn't crowd
+		// out the event list on very tall terminals). Sweden's aspect ratio
+		// means more rows also means a proportionally wider, more detailed
+		// silhouette — see renderSwedenMap's own width derivation.
+		mapRows := max(14, min(44, a.Height-24))
+		b.WriteString(renderSwedenMap(a.Events, a.Width-4, mapRows))
 		b.WriteString("\n\n")
 		rows := 12
-		if a.Height > 0 && a.Height-25 > rows {
-			rows = a.Height - 25
+		if a.Height > 0 && a.Height-(mapRows+9) > rows {
+			rows = a.Height - (mapRows + 9)
 		}
 		b.WriteString(titleStyle.Render(fmt.Sprintf("SENASTE HÄNDELSER · %d AV %d", minInt(rows, len(a.Events)), len(a.Events))))
 		b.WriteString("\n")
@@ -1105,18 +1278,18 @@ func (a App) View() string {
 		b.WriteString(renderGandrChat(a))
 	}
 	if a.Input.Focused() {
-		b.WriteString("\n\n" + a.Input.View())
+		b.WriteString("\n" + a.Input.View())
 	}
 	if a.Status != "" {
-		b.WriteString("\n\n" + muted.Render(a.Status))
+		b.WriteString("\n" + muted.Render(a.Status))
 	}
 	if a.PaletteOpen {
-		b.WriteString("\n\n" + renderPalette(a))
+		b.WriteString("\n" + renderPalette(a))
 	}
 	if a.CurrentView == ViewGandr || a.CurrentView == ViewGandrChat {
-		b.WriteString("\n\n" + muted.Render("j/k flytta · Enter öppna · / kommando · Esc lämna fält · x radera valv · n radera + skapa nytt · q tillbaka"))
+		b.WriteString("\n" + muted.Render("j/k flytta · Enter öppna · / kommando · Esc lämna fält · x radera valv · n radera + skapa nytt · q tillbaka"))
 	} else {
-		b.WriteString("\n\n" + muted.Render("j/k flytta · Enter öppna · ") + accent.Render("f") + muted.Render(" forum · ") + accent.Render("/") + muted.Render(" fjärrsök · ") + accent.Render("Ctrl+F") + muted.Render(" lokalt · ") + accent.Render("p") + muted.Render(" polis · ") + accent.Render("m") + muted.Render(" mesh · ") + accent.Render("g") + muted.Render(" Gandr · ") + accent.Render("h") + muted.Render(" hem · q tillbaka/avsluta"))
+		b.WriteString("\n" + muted.Render("j/k · Enter · ") + accent.Render("F5") + muted.Render(" uppdatera · ") + accent.Render("f") + muted.Render(" forum · ") + accent.Render("/") + muted.Render(" fjärr · ") + accent.Render("Ctrl+F") + muted.Render(" lokalt · ") + accent.Render("p") + muted.Render(" polis · ") + accent.Render("m") + muted.Render(" mesh · ") + accent.Render("g") + muted.Render(" Gandr · ") + accent.Render("h") + muted.Render(" hem · q tillbaka"))
 	}
 	return b.String()
 }
@@ -1169,11 +1342,14 @@ func (a App) runPaletteItem() (tea.Model, tea.Cmd) {
 	item := paletteItems[a.PaletteCursor]
 	switch item.Key {
 	case "h":
-		closeGandrSession(&a)
+		// Same as the direct "h"/"home" keybinding: navigating home must not
+		// close an already-unlocked GANDR session.
 		a.CurrentView, a.Cursor, a.EventDetail = ViewOverview, 0, nil
 		return a, loadDashboard(a.DashboardSvc)
 	case "f":
-		a.CurrentView, a.Cursor = ViewForums, 0
+		// Same as the direct "f" keybinding: reset the breadcrumb Stack so
+		// a previous browse session cannot leak into the forum path.
+		a.CurrentView, a.Cursor, a.Stack = ViewForums, 0, nil
 		return a, loadRoot(a.Store, a.Client)
 	case "/", "ctrl+f":
 		a.SearchRemote = item.Key == "/"
@@ -1193,7 +1369,14 @@ func (a App) runPaletteItem() (tea.Model, tea.Cmd) {
 		a.CurrentView, a.Cursor = ViewMesh, 0
 		return a, nil
 	case "g":
-		a.CurrentView, a.Cursor = ViewGandr, 0
+		a.Cursor = 0
+		if a.GandrSession != nil {
+			// Same as the direct "g" keybinding: a still-connected session
+			// goes straight back to the chat instead of re-prompting.
+			a.CurrentView = ViewGandrChat
+			return a, nil
+		}
+		a.CurrentView = ViewGandr
 		a.GandrCreating, a.GandrConfirming, a.GandrPassphrase = false, false, ""
 		a.Input.SetValue("")
 		a.Input.EchoMode = textinput.EchoPassword
@@ -1209,52 +1392,114 @@ func viewHeading(label, context string) string {
 	return titleStyle.Render(label) + "  " + metadata.Render("· "+context)
 }
 
-func renderGandrChat(a App) string {
+// gandrGroupHint swaps the footer's group hint depending on whether a
+// private group is currently open, so "leave the group" is only advertised
+// when there is actually a group to leave.
+func gandrGroupHint(a App) string {
+	if a.GandrActiveGroup != nil {
+		return " b lämna grupp · /grupp bjud ·"
+	}
+	return " /grupp skapa|öppna ·"
+}
+
+// gandrSidebarWidth mirrors renderGandrChat's own width breakpoint so the
+// mouse handler and the renderer never compute a different sidebar width
+// from each other.
+func gandrSidebarWidth(a App) int {
 	width := a.Width
 	if width < 60 {
 		width = 80
 	}
-	sidebarWidth := 24
 	if width < 90 {
-		sidebarWidth = 20
+		return 20
 	}
-	mainWidth := width - sidebarWidth - 3
-	if mainWidth < 28 {
-		mainWidth = 28
-	}
+	return 24
+}
 
-	var sidebar strings.Builder
-	sidebar.WriteString(sectionStyle.Render("KANALER"))
-	sidebar.WriteString("\n" + metadata.Render("────────────────────") + "\n")
+type gandrSidebarActionKind int
+
+const (
+	gandrActionNone gandrSidebarActionKind = iota
+	gandrActionSelectChannel
+	gandrActionJoinChannel
+	gandrActionLeaveChannel
+	gandrActionCreateGroup
+	gandrActionDeleteVault
+	gandrActionListGroups
+	gandrActionOpenGroup
+)
+
+type gandrSidebarAction struct {
+	Kind  gandrSidebarActionKind
+	Index int // into a.GandrChannels or a.GandrGroups, depending on Kind
+}
+
+// gandrSidebarRows builds the GANDR sidebar as parallel (line, action)
+// slices: rendering and mouse click handling both read from this single
+// function, so a click can never land on a different element than what's
+// visually there — before this, the click handler kept its own hand-counted
+// row offsets that had drifted out of sync with the actual render order.
+func gandrSidebarRows(a App, sidebarWidth int) ([]string, []gandrSidebarAction) {
+	lines := []string{sectionStyle.Render("KANALER"), metadata.Render("────────────────────")}
+	actions := []gandrSidebarAction{{}, {}}
 	if len(a.GandrChannels) == 0 {
-		sidebar.WriteString(muted.Render("inga kanaler"))
+		lines = append(lines, muted.Render("inga kanaler"))
+		actions = append(actions, gandrSidebarAction{})
 	} else {
 		for i, channel := range a.GandrChannels {
 			line := "# " + truncate(channel.Name, sidebarWidth-4)
 			if i == a.Cursor {
 				line = selected.Render("› " + truncate(channel.Name, sidebarWidth-4))
 			}
-			sidebar.WriteString(line + "\n")
+			lines = append(lines, line)
+			actions = append(actions, gandrSidebarAction{Kind: gandrActionSelectChannel, Index: i})
 		}
 	}
-	sidebar.WriteString("\n" + muted.Render("/join namn"))
-	sidebar.WriteString("\n" + muted.Render("/leave"))
-	sidebar.WriteString("\n" + accent.Render("+ skapa kanal"))
-	sidebar.WriteString("\n" + accent.Render("+ skapa privat grupp"))
+	lines = append(lines, muted.Render("/join namn"), muted.Render("/leave"), accent.Render("+ skapa kanal"), accent.Render("+ skapa privat grupp"))
+	actions = append(actions,
+		gandrSidebarAction{Kind: gandrActionJoinChannel},
+		gandrSidebarAction{Kind: gandrActionLeaveChannel},
+		gandrSidebarAction{Kind: gandrActionJoinChannel},
+		gandrSidebarAction{Kind: gandrActionCreateGroup},
+	)
 	if a.Gandr != nil && a.Gandr.HasVault() {
-		sidebar.WriteString("\n" + critical.Render("[!] radera GANDR-valv"))
+		lines = append(lines, critical.Render("[!] radera GANDR-valv"))
+		actions = append(actions, gandrSidebarAction{Kind: gandrActionDeleteVault})
 	}
 	if len(a.GandrGroups) > 0 {
-		sidebar.WriteString("\n\n" + sectionStyle.Render("PRIVATA GRUPPER"))
-		for _, group := range a.GandrGroups {
+		lines = append(lines, "", sectionStyle.Render("PRIVATA GRUPPER"))
+		actions = append(actions, gandrSidebarAction{}, gandrSidebarAction{})
+		for i, group := range a.GandrGroups {
 			marker := "🔒"
-			if a.GandrActiveGroup != nil && *a.GandrActiveGroup == group.ID {
+			switch {
+			case a.GandrActiveGroup != nil && *a.GandrActiveGroup == group.ID:
 				marker = "›"
+			case a.GandrSession != nil && a.GandrSession.IsGroupUnlocked(group.ID):
+				marker = "🔓"
 			}
-			sidebar.WriteString("\n" + marker + " " + truncate(group.Name, sidebarWidth-5))
+			lines = append(lines, marker+" "+truncate(group.Name, sidebarWidth-5))
+			actions = append(actions, gandrSidebarAction{Kind: gandrActionOpenGroup, Index: i})
 		}
-		sidebar.WriteString("\n" + muted.Render("/grupp lista"))
+		lines = append(lines, muted.Render("/grupp lista"))
+		actions = append(actions, gandrSidebarAction{Kind: gandrActionListGroups})
 	}
+	return lines, actions
+}
+
+func renderGandrChat(a App) string {
+	width := a.Width
+	if width < 60 {
+		width = 80
+	}
+	sidebarWidth := gandrSidebarWidth(a)
+	mainWidth := width - sidebarWidth - 3
+	if mainWidth < 28 {
+		mainWidth = 28
+	}
+
+	sidebarLines, _ := gandrSidebarRows(a, sidebarWidth)
+	var sidebar strings.Builder
+	sidebar.WriteString(strings.Join(sidebarLines, "\n"))
 
 	var main strings.Builder
 	if a.GandrActiveGroup != nil {
@@ -1329,18 +1574,24 @@ func renderGandrChat(a App) string {
 				if name == "" {
 					name = fmt.Sprintf("~%x", contact.Pubkey[:4])
 				}
-				marker := "○"
-				presence := "EJ PÅ MESH"
-				if gandrPeerOnline(a.GandrPeers, contact.Pubkey) {
-					marker = "●"
-					presence = "PÅ MESH"
+				isOnline := gandrPeerOnline(a.GandrPeers, contact.Pubkey)
+				marker, presence := "○", "EJ PÅ MESH"
+				if isOnline {
+					marker, presence = "●", "PÅ MESH"
 				}
-				line := marker + " " + truncate(name, memberWidth-4)
+				var line string
 				if i == a.GandrRightCursor {
-					line = selected.Render("› " + line)
+					// The selection background already carries the row's
+					// emphasis, so the marker keeps its plain glyph here
+					// instead of nesting a second color inside it.
+					line = selected.Render("› " + marker + " " + truncate(name, memberWidth-4))
+				} else if isOnline {
+					line = online.Render(marker) + " " + truncate(name, memberWidth-4)
+				} else {
+					line = muted.Render(marker) + " " + truncate(name, memberWidth-4)
 				}
 				members.WriteString(line + "\n")
-				if gandrPeerOnline(a.GandrPeers, contact.Pubkey) {
+				if isOnline {
 					members.WriteString(online.Render("  "+presence) + "\n")
 				} else {
 					members.WriteString(muted.Render("  "+presence) + "\n")
@@ -1349,9 +1600,9 @@ func renderGandrChat(a App) string {
 		}
 		members.WriteString("\n" + muted.Render("a lägg till · x blockera"))
 		memberView := gandrPanel(members.String(), memberWidth)
-		return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView, memberView) + "\n\n" + muted.Render("j/k kanal · ↑/↓ användare · Enter skriv · a lägg till · /invite · /grupp skapa|öppna · x blockera · q tillbaka")
+		return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView, memberView) + "\n\n" + muted.Render("j/k kanal · ↑/↓ användare · Enter skriv · a lägg till · /invite ·"+gandrGroupHint(a)+" x blockera · q tillbaka")
 	}
-	return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView) + "\n\n" + muted.Render("j/k kanal · Enter skriv · /invite · /grupp lista · q tillbaka")
+	return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView) + "\n\n" + muted.Render("j/k kanal · Enter skriv · /invite ·"+gandrGroupHint(a)+" q tillbaka")
 }
 
 func gandrPanel(content string, width int) string {
@@ -1380,12 +1631,23 @@ func (a App) breadcrumb() string {
 func renderNodes(xs []flashback.ForumNode, c int) string {
 	var b strings.Builder
 	for i, n := range xs {
-		line := n.Title
+		title := n.Title
+		if !n.Browsable {
+			// A category is a local structural grouping, not a real forum —
+			// mark it the same muted grey used for de-emphasized text
+			// elsewhere, so it reads as "not a destination" at a glance
+			// instead of only being distinguishable by reading the label.
+			title = muted.Render(title)
+		}
+		line := title
 		if n.HasChildren {
 			line += "  " + titleStyle.Render("›")
 		}
 		if i == c {
-			line = selected.Render(line)
+			line = selected.Render(n.Title)
+			if n.HasChildren {
+				line += "  " + selected.Render("›")
+			}
 		}
 		b.WriteString(line + "\n")
 	}
@@ -1411,7 +1673,7 @@ func renderThreadsAtWidth(xs []flashback.ThreadSummary, c, width int) string {
 		if i == c {
 			line = selected.Render(line)
 		}
-		meta := clip(fmt.Sprintf("      #%s · %s svar · %s visningar · %s sidor", n.ID, number(n.Replies), number(n.Views), pageCount(n.PageCount)), width)
+		meta := clip(fmt.Sprintf("#%s · %s svar · %s visningar · %s sidor", n.ID, number(n.Replies), number(n.Views), pageCount(n.PageCount)), width)
 		if i == c {
 			meta = selectedMeta.Render(meta)
 		}
@@ -1428,9 +1690,29 @@ func renderThreadWorkspace(a App) string {
 	if width < 1 {
 		width = 120
 	}
-	if width < 100 {
-		content := "SIDA " + number(a.ForumPage) + " · [/] föregående/nästa\n" + renderThreadsAtWidth(a.Threads, a.Cursor, width-4)
+	threadCursor := a.Cursor
+	// Keep the forum path visible on ordinary laptop terminals. The old
+	// breakpoint collapsed too early and made a long thread list context-free.
+	if width < 72 {
+		content := "◀ föregående sida · SIDA " + number(a.ForumPage) + " · ▶ nästa sida\n" + strings.Join(threadListWindow(a.Threads, threadCursor, width-4, visibleThreadCount(a.Height)), "\n")
 		return lipgloss.NewStyle().Width(width-2).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("238")).Padding(0, 1).Render(content)
+	}
+	if width < 100 {
+		leftWidth := 27
+		centerWidth := width - leftWidth - 3
+		if centerWidth < 38 {
+			centerWidth = 38
+		}
+		threads := []string{fmt.Sprintf("◀ sida %d ▶", a.ForumPage)}
+		if len(a.Threads) == 0 {
+			threads = append(threads, muted.Render("Inga trådar hämtade ännu."), muted.Render("Tryck r för att uppdatera."))
+		} else {
+			threads = append(threads, threadListWindow(a.Threads, threadCursor, centerWidth-2, visibleThreadCount(a.Height))...)
+		}
+		return joinPanels(
+			renderPanel("FORUMTRÄD", forumPathLines(a, leftWidth-2), leftWidth),
+			renderPanel("TRÅDAR", threads, centerWidth),
+		)
 	}
 
 	leftWidth, rightWidth := 27, 39
@@ -1439,48 +1721,25 @@ func renderThreadWorkspace(a App) string {
 		centerWidth = 34
 	}
 
-	left := []string{".."}
-	for i, node := range a.Stack {
-		marker := "  "
-		if i == len(a.Stack)-1 {
-			marker = "› "
-		}
-		left = append(left, marker+clip(node.Title, leftWidth-4))
-	}
-	if len(a.Stack) == 0 {
-		left = append(left, muted.Render("Ingen forumvald"))
-	}
+	left := forumPathLines(a, leftWidth-2)
 
-	threadLines := make([]string, 0, len(a.Threads)*2+1)
+	threadLines := make([]string, 0, visibleThreadCount(a.Height)*2+1)
 	if len(a.Threads) == 0 {
 		threadLines = append(threadLines, muted.Render("Ingen trådar hämtade ännu."), muted.Render("Tryck r för att uppdatera."))
 	} else {
-		for i, thread := range a.Threads {
-			title := firstNonEmpty(thread.Title, "Tråd #"+thread.ID)
-			prefix := fmt.Sprintf("%3d ", i+1)
-			if thread.Sticky {
-				prefix = "📌 " + prefix
-			}
-			line := prefix + clip(title, centerWidth-4)
-			meta := fmt.Sprintf("    #%s · %s svar · %s visningar · %s sidor", thread.ID, number(thread.Replies), number(thread.Views), pageCount(thread.PageCount))
-			if i == a.Cursor {
-				line = selected.Render(line)
-				meta = selectedMeta.Render(meta)
-			}
-			threadLines = append(threadLines, line, meta)
-		}
+		threadLines = threadListWindow(a.Threads, threadCursor, centerWidth-2, visibleThreadCount(a.Height))
 	}
 
 	detail := []string{"Ingen tråd vald."}
-	if a.Cursor >= 0 && a.Cursor < len(a.Threads) {
-		thread := a.Threads[a.Cursor]
+	if threadCursor >= 0 && threadCursor < len(a.Threads) {
+		thread := a.Threads[threadCursor]
 		detail = []string{
-			clip(firstNonEmpty(thread.Title, "Tråd #"+thread.ID), rightWidth-2),
+			strong.Render(clip(firstNonEmpty(thread.Title, "Tråd #"+thread.ID), rightWidth-2)),
 			"",
-			"ID          #" + thread.ID,
-			"Svar        " + number(thread.Replies),
-			"Visningar   " + number(thread.Views),
-			"Sidor       " + pageCount(thread.PageCount),
+			"ID          " + metadata.Render("#"+thread.ID),
+			"Svar        " + accent.Render(number(thread.Replies)),
+			"Visningar   " + titleStyle.Render(number(thread.Views)),
+			"Sidor       " + sectionStyle.Render(pageCount(thread.PageCount)+" sidor"),
 			"Författare   " + firstNonEmpty(thread.Author, "—"),
 			"Senast      " + firstNonEmpty(thread.LastPostAuthor, "—"),
 			"Tid         " + formatPostTime(thread.LastPostAt),
@@ -1491,9 +1750,152 @@ func renderThreadWorkspace(a App) string {
 
 	return joinPanels(
 		renderPanel("FORUMTRÄD", left, leftWidth),
-		renderPanel(fmt.Sprintf("TRÅDAR · SIDA %d · [/] FÖREGÅENDE/NÄSTA", a.ForumPage), threadLines, centerWidth),
+		renderPanel(fmt.Sprintf("TRÅDAR · SIDA %d · ◀/▶ BYT SIDA", a.ForumPage), threadLines, centerWidth),
 		renderPanel("DETALJER", detail, rightWidth),
 	)
+}
+
+func forumPathLines(a App, width int) []string {
+	if width < 10 {
+		width = 10
+	}
+	lines := []string{"⌂ FLASHBACK"}
+	for i, node := range a.Stack {
+		marker := "  "
+		if i == len(a.Stack)-1 {
+			marker = "› "
+		}
+		lines = append(lines, marker+clip(node.Title, width))
+	}
+	if len(a.Stack) == 0 {
+		lines = append(lines, muted.Render("Ingen forumvald"))
+	} else {
+		lines = append(lines, "", muted.Render("b · upp en nivå"))
+	}
+	return lines
+}
+
+// renderReaderWorkspace keeps the forum context and the current category
+// visible while reading. The right panel is the only scrolling area; the
+// forum path and thread cursor remain stable landmarks.
+func renderReaderWorkspace(a App) string {
+	width := a.Width
+	if width < 100 {
+		width = 100
+	}
+	leftWidth, centerWidth := 25, 35
+	rightWidth := width - leftWidth - centerWidth - 6
+	if rightWidth < 36 {
+		rightWidth = 36
+	}
+
+	threadLines := threadListWindow(a.Threads, a.ThreadCursor, centerWidth-2, visibleThreadCount(a.Height))
+	if len(a.Threads) == 0 {
+		threadLines = []string{muted.Render("Ingen trådlista lokalt."), muted.Render("fylls på vid uppdatering")}
+	}
+
+	readerLines := []string{muted.Render("Inläggen hämtas…")}
+	if len(a.Posts) > 0 {
+		reader := a.PostViewport
+		reader.Width = rightWidth - 2
+		height := a.Height - 9
+		if height < 6 {
+			height = 6
+		}
+		reader.Height = height
+		reader.SetContent(renderPostsWidth(a.Posts, a.Cursor, rightWidth-4))
+		readerLines = strings.Split(reader.View(), "\n")
+	}
+
+	return joinPanels(
+		renderPanel("FORUMTRÄD", forumPathLines(a, leftWidth-2), leftWidth),
+		renderPanel("TRÅDAR · ◀/▶ BYT SIDA", append([]string{fmt.Sprintf("SIDA %d", a.ForumPage)}, threadLines...), centerWidth),
+		renderPanel("LÄSER", readerLines, rightWidth),
+	)
+}
+
+func visibleThreadCount(height int) int {
+	if height < 1 {
+		return 12
+	}
+	// Each thread occupies two rows. Keep the shell (heading and footer)
+	// visible instead of letting a long list scroll the whole terminal.
+	count := (height - 10) / 2
+	if count < 4 {
+		return 4
+	}
+	return count
+}
+
+func threadListWindow(xs []flashback.ThreadSummary, cursor, width, count int) []string {
+	if len(xs) == 0 {
+		return []string{muted.Render("Ingen trådlista finns lokalt ännu.")}
+	}
+	if width < 32 {
+		width = 32
+	}
+	if count < 1 || count > len(xs) {
+		count = len(xs)
+	}
+	// A negative cursor (e.g. ThreadCursor == -1 after opening a thread from
+	// remote search) means "no local selection" rather than "select the
+	// first row" — window around the top of the list but never highlight a
+	// row that was never actually selected.
+	hasSelection := cursor >= 0
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(xs) {
+		cursor = len(xs) - 1
+	}
+	start := cursor - count/2
+	if start < 0 {
+		start = 0
+	}
+	if start+count > len(xs) {
+		start = len(xs) - count
+	}
+	lines := make([]string, 0, count*2)
+	for i := start; i < start+count; i++ {
+		n := xs[i]
+		prefix := fmt.Sprintf("%3d  ", i+1)
+		if n.Sticky {
+			prefix = "📌 " + prefix
+		}
+		title := clip(firstNonEmpty(n.Title, "Tråd #"+n.ID), width-lipgloss.Width(prefix))
+		var line, meta string
+		if hasSelection && i == cursor {
+			// The selection background already carries the row's emphasis;
+			// per-field colors would fight it, so this row stays uniform
+			// (matches the same tradeoff made for police glyphs and the
+			// GANDR presence markers elsewhere in this file).
+			line = selected.Render(prefix + title)
+			meta = selectedMeta.Render(clip(threadMetaLine(n), width))
+		} else {
+			line = prefix + strong.Render(title)
+			meta = clip(threadMetaLineColored(n), width)
+		}
+		lines = append(lines, line, meta)
+	}
+	return lines
+}
+
+// threadMetaLine is the plain (unstyled) thread metadata line, used as-is
+// under selection highlighting where per-field colors would fight the
+// background, and as the basis threadMetaLineColored re-derives from.
+func threadMetaLine(n flashback.ThreadSummary) string {
+	return fmt.Sprintf("      #%s · %s svar · %s visningar · %s sidor", n.ID, number(n.Replies), number(n.Views), pageCount(n.PageCount))
+}
+
+// threadMetaLineColored gives each field its own color — thread number
+// (de-emphasized, it's a reference not a measure), replies, views and page
+// count — so they read as distinct values at a glance instead of one flat
+// grey line, without needing to parse the labels.
+func threadMetaLineColored(n flashback.ThreadSummary) string {
+	return "      " + metadata.Render("#"+n.ID) +
+		metadata.Render(" · ") + accent.Render(number(n.Replies)+" svar") +
+		metadata.Render(" · ") + titleStyle.Render(number(n.Views)+" visningar") +
+		metadata.Render(" · ") + sectionStyle.Render(pageCount(n.PageCount)+" sidor")
 }
 
 func pageCount(value int) string {
@@ -1518,10 +1920,13 @@ func renderPostsWidth(xs []flashback.Post, c, width int) string {
 			header = titleStyle.Render(clip(header, width))
 		}
 		b.WriteString(header + "\n")
-		for _, line := range wrapText(firstNonEmpty(n.Text, "(tomt inlägg)"), width-4) {
+		for _, line := range wrapText(highlightURLs(firstNonEmpty(n.Text, "(tomt inlägg)")), width-4) {
 			b.WriteString("  " + line + "\n")
 		}
 		for _, quote := range n.Quotes {
+			// Not URL-highlighted: this whole line is already wrapped in
+			// muted.Render(), and nesting another style's reset code inside
+			// it would cut the grey styling short partway through the line.
 			b.WriteString(muted.Render("  │ Citat: ") + muted.Render(clip(quote.Text, width-11)) + "\n")
 		}
 		if i+1 < len(xs) {
@@ -1608,14 +2013,16 @@ func renderEventWindow(xs []external.ExternalEvent, c, maxRows int) string {
 	}
 	for i := start; i < end; i++ {
 		e := xs[i]
-		line := fmt.Sprintf("%s · %s · %s", formatSwedishEventTime(e.Timestamp), e.EventType, e.LocationName)
+		// The category glyph stays in its category color even on the
+		// selected row; only the descriptive text gets the cursor highlight.
+		text := fmt.Sprintf("%s · %s · %s", formatSwedishEventTime(e.Timestamp), e.EventType, e.LocationName)
 		if e.Title != "" {
-			line += " · " + e.Title
+			text += " · " + e.Title
 		}
 		if i == c {
-			line = selected.Render(line)
+			text = selected.Render(text)
 		}
-		b.WriteString(line + "\n")
+		b.WriteString(policeCategoryGlyph(e.EventType) + " " + text + "\n")
 	}
 	if end < len(xs) {
 		b.WriteString(muted.Render("↓ fler senare") + "\n")
@@ -1656,73 +2063,51 @@ func renderEventDetail(e external.ExternalEvent) string {
 	return b.String()
 }
 
-func renderPoliceMap(events []external.ExternalEvent, width int) string {
-	mapWidth := width - 4
-	if mapWidth <= 0 || mapWidth > 68 {
-		mapWidth = 64
-	}
-	const mapHeight = 16
-	grid := make([][]rune, mapHeight)
-	for y := range grid {
-		grid[y] = make([]rune, mapWidth)
-		for x := range grid[y] {
-			grid[y][x] = ' '
-		}
-	}
-	// A restrained terminal silhouette: the coordinates, rather than the
-	// artwork, are authoritative. It remains useful when terminal graphics
-	// are unavailable and can later be replaced by a richer ANSI asset.
-	outline := []string{
-		"                         ╭──╮",
-		"                       ╭─╯  ╰╮",
-		"                      ╭╯     │",
-		"                     ╭╯      │",
-		"                    ╭╯       │",
-		"                   ╭╯        │",
-		"                  ╭╯         │",
-		"                 ╭╯          │",
-		"                ╭╯           │",
-		"               ╭╯            │",
-		"              ╭╯             │",
-		"             ╭╯              │",
-		"            ╭╯               │",
-		"           ╰╮               ╭╯",
-		"            ╰───────────────╯",
-		"                 ╰──────╯",
-	}
-	for y, line := range outline {
-		start := (mapWidth - len([]rune(line))) / 2
-		for x, r := range []rune(line) {
-			if start+x >= 0 && start+x < mapWidth {
-				grid[y][start+x] = r
+// policeCategories buckets Polisen's free-text event types (there is no
+// fixed enum in the API) by keyword. Order matters: the first matching
+// category wins, so more specific/severe categories are listed before
+// broader ones (e.g. "hot" as in "Olaga hot" must land in VÅLD before any
+// looser category could claim it). The final entry has no keywords and is
+// the catch-all for anything unmatched.
+var policeCategories = []struct {
+	Label    string
+	Glyph    string
+	Color    string // raw ANSI-256 code backing Style, reused for map pixel fills
+	Style    lipgloss.Style
+	Keywords []string
+}{
+	{"VÅLD", "✕", "167", critical, []string{"mord", "dråp", "misshandel", "rån", "sexual", "våldtäkt", "skottlossning", "knivlagen", "vapenlagen", "explosion", "detonation", "hot"}},
+	{"TRAFIK", "▲", "215", accent, []string{"trafik", "rattfylleri"}},
+	{"MISSBRUK", "◆", "178", warning, []string{"narkotika", "fylleri", "lob"}},
+	{"EGENDOM", "▪", "178", warning, []string{"stöld", "inbrott", "skadegörelse", "bedrägeri"}},
+	{"RÄDDNING", "✚", "108", online, []string{"räddning", "försvunnen", "anträffad", "olycka", "brand"}},
+	{"RUTIN", "·", "241", muted, []string{"sammanfattning", "kontroll"}},
+	{"ÖVRIGT", "●", "244", metadata, nil},
+}
+
+func policeCategoryIndex(eventType string) int {
+	// Match per word (by prefix, to catch Swedish compounds like
+	// "Trafikolycka" or "Narkotikabrott"), not by raw substring — a plain
+	// strings.Contains would let short keywords like "rån" (robbery) falsely
+	// match inside unrelated words such as "från" (from).
+	words := strings.FieldsFunc(strings.ToLower(eventType), func(r rune) bool {
+		return !unicode.IsLetter(r)
+	})
+	for i, c := range policeCategories {
+		for _, kw := range c.Keywords {
+			for _, w := range words {
+				if strings.HasPrefix(w, kw) {
+					return i
+				}
 			}
 		}
 	}
-	points := 0
-	for _, event := range events {
-		if event.Latitude == nil || event.Longitude == nil {
-			continue
-		}
-		// Sweden roughly spans 55–69°N and 10–24°E.
-		x := int((*event.Longitude - 10) / 14 * float64(mapWidth-1))
-		y := int((69 - *event.Latitude) / 14 * float64(mapHeight-1))
-		if x < 0 || x >= mapWidth || y < 0 || y >= mapHeight {
-			continue
-		}
-		grid[y][x] = '●'
-		points++
-	}
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("KARTA · POLISHÄNDELSER") + "\n")
-	if points == 0 {
-		b.WriteString(muted.Render("Inga händelser med koordinater."))
-		return b.String()
-	}
-	for _, row := range grid {
-		b.WriteString(string(row) + "\n")
-	}
-	b.WriteString(muted.Render(fmt.Sprintf("● %d händelser · 55–69°N · 10–24°E", points)))
-	return b.String()
+	return len(policeCategories) - 1
+}
+
+func policeCategoryGlyph(eventType string) string {
+	c := policeCategories[policeCategoryIndex(eventType)]
+	return c.Style.Render(c.Glyph)
 }
 
 func renderDashboard(a App) string {
@@ -1765,11 +2150,7 @@ func renderDashboard(a App) string {
 				fmt.Sprintf("Objekt      %d", d.MeshObjects),
 				fmt.Sprintf("RX/TX       %s / %s", bytesUint(d.MeshRX), bytesUint(d.MeshTX)),
 			}, columnWidth),
-			renderPanel("GANDR", []string{
-				fmt.Sprintf("ᚷ           %s", d.Gandr),
-				"Privat läge",
-				"Ingen data delas",
-			}, columnWidth),
+			renderPanel("GANDR", gandrDashboardLines(a), columnWidth),
 		))
 		b.WriteString("\n\n")
 		eventLines := []string{"Inga sparade polishändelser."}
@@ -1780,13 +2161,13 @@ func renderDashboard(a App) string {
 	} else if width >= 80 {
 		b.WriteString(fmt.Sprintf("LOKAL DATA\nForum %s · Trådar %s · Inlägg %s · DB %s\n\n", number(d.ForumCount), number(d.ThreadCount), number(d.PostCount), bytes(d.DBSize)))
 		b.WriteString(fmt.Sprintf("AKTIVITET\nInlägg / 60m %s · Aktiva trådar %s · Nya trådar %s\n\n", number(d.PostsLastHour), number(d.ActiveThreads), number(d.NewThreads)))
-		b.WriteString(fmt.Sprintf("STATUS\nDB REDO · Nätverk %s · Session %s · Synk %s\n\nCACHE-MESH %s · noder %d · fjärrpeers %d · delning %s · GANDR ᚷ %s\n", d.Network, d.Session, d.Sync, d.Mesh, d.MeshPeers+1, d.MeshPeers, d.MeshSharing, d.Gandr))
+		b.WriteString(fmt.Sprintf("STATUS\nDB REDO · Nätverk %s · Session %s · Synk %s\n\nCACHE-MESH %s · noder %d · fjärrpeers %d · delning %s · RX/TX %s / %s · GANDR ᚷ %s\n", d.Network, d.Session, d.Sync, d.Mesh, d.MeshPeers+1, d.MeshPeers, d.MeshSharing, bytesUint(d.MeshRX), bytesUint(d.MeshTX), gandrStateLabel(a)))
 		b.WriteString("POLISHÄNDELSER\n" + renderEventSummary(a.Events))
 	} else {
 		b.WriteString("DATA\n")
 		b.WriteString(fmt.Sprintf("%s forum\n%s trådar\n%s inlägg\n\n", number(d.ForumCount), number(d.ThreadCount), number(d.PostCount)))
 		b.WriteString("AKTIVITET\n" + number(d.PostsLastHour) + " / 60m\n\n")
-		b.WriteString("MESH " + d.Mesh + "\nnoder " + number(d.MeshPeers+1) + " · fjärrpeers " + number(d.MeshPeers) + " · objekt " + number(d.MeshObjects) + "\nGANDR ᚷ " + d.Gandr)
+		b.WriteString("MESH " + d.Mesh + "\nnoder " + number(d.MeshPeers+1) + " · fjärrpeers " + number(d.MeshPeers) + " · objekt " + number(d.MeshObjects) + "\nGANDR ᚷ " + gandrStateLabel(a))
 	}
 	b.WriteString("\n\n" + muted.Render("[f] Forum  [/] Sök  [p] Polis  [m] Mesh  [g] Gandr  [h] Hem"))
 	return b.String()
@@ -1826,22 +2207,63 @@ func renderPanel(title string, lines []string, width int) []string {
 
 func statusValue(value string) string {
 	switch strings.ToUpper(strings.TrimSpace(value)) {
-	case "PÅ", "ONLINE", "AKTIV", "REDO", "VILAR":
+	case "PÅ", "ONLINE", "AKTIV", "REDO", "VILAR", "UPPLÅST":
 		return online.Render(value)
 	case "FEL", "OFFLINE", "DEGRADED":
 		return critical.Render(value)
-	case "STARTAR", "VALD", "UPPDATERAR…":
+	case "STARTAR", "VALD", "UPPDATERAR…", "VALV SAKNAS":
 		return warning.Render(value)
 	default:
 		return metadata.Render(value)
 	}
 }
 
+// gandrStateLabel is the single-line counterpart of gandrDashboardLines, for
+// the narrower dashboard layouts that only have room for one GANDR field.
+func gandrStateLabel(a App) string {
+	return string(a.Gandr.Summary().State)
+}
+
+// gandrDashboardLines reads GANDR's live in-memory state directly (a cheap,
+// mutex-guarded read — no vault I/O), instead of the dashboard snapshot's
+// static placeholder. The snapshot is built by DashboardService, which is
+// deliberately kept out of GANDR's private boundary, so it cannot know
+// whether the vault is actually unlocked; only the TUI layer holds both.
+func gandrDashboardLines(a App) []string {
+	summary := a.Gandr.Summary()
+	switch summary.State {
+	case gandr.Unlocked:
+		lines := []string{"ᚷ           " + statusValue(string(gandr.Unlocked))}
+		if summary.Fingerprint != "" {
+			lines = append(lines, "Nyckel      "+summary.Fingerprint)
+		}
+		if a.GandrSession != nil {
+			lines = append(lines, fmt.Sprintf("Kanaler     %d", len(a.GandrChannels)))
+		}
+		return append(lines, "Privat läge")
+	case gandr.Missing:
+		return []string{"ᚷ           " + statusValue(string(gandr.Missing)), "Inget valv skapat än", "Tryck g för att skapa"}
+	case gandr.UnlockErr:
+		return []string{"ᚷ           " + statusValue(string(gandr.UnlockErr)), "Senaste upplåsning misslyckades", "Privat läge"}
+	default:
+		return []string{"ᚷ           " + statusValue(string(gandr.Locked)), "Privat läge", "Ingen data delas"}
+	}
+}
+
 func joinPanels(panels ...[]string) string {
 	maxRows := 0
-	for _, panel := range panels {
+	// renderPanel pads every line of a panel to the same fixed width, so the
+	// first line's width stands in for the whole column. Once a shorter
+	// panel runs out of rows, later columns must still be offset by that
+	// width — otherwise every row below the shortest panel collapses
+	// leftward, dragging every column after it out of alignment.
+	widths := make([]int, len(panels))
+	for i, panel := range panels {
 		if len(panel) > maxRows {
 			maxRows = len(panel)
+		}
+		if len(panel) > 0 {
+			widths[i] = displayWidth(panel[0])
 		}
 	}
 	var b strings.Builder
@@ -1852,6 +2274,8 @@ func joinPanels(panels ...[]string) string {
 			}
 			if row < len(panel) {
 				b.WriteString(panel[row])
+			} else {
+				b.WriteString(strings.Repeat(" ", widths[i]))
 			}
 		}
 		if row+1 < maxRows {
@@ -1866,21 +2290,13 @@ func displayWidth(value string) int {
 }
 
 func clip(value string, width int) string {
-	if displayWidth(value) <= width {
-		return value
+	if width <= 0 {
+		return ""
 	}
-	if width <= 1 {
-		return "…"
-	}
-	for len([]rune(value)) > 0 {
-		runes := []rune(value)
-		candidate := string(runes[:len(runes)-1]) + "…"
-		if displayWidth(candidate) <= width {
-			return candidate
-		}
-		value = string(runes[:len(runes)-1])
-	}
-	return "…"
+	// ANSI-aware truncation is important here: panel rows may already contain
+	// Lip Gloss styling. Rune slicing can count escape bytes as visible text,
+	// producing rows that wrap at column zero and destroy the three-pane layout.
+	return ansi.Truncate(value, width, "…")
 }
 
 func truncate(value string, width int) string {
@@ -2133,11 +2549,42 @@ func acceptGandrInvitation(session *gandr.Session, value string) tea.Cmd {
 	}
 }
 
-func gandrGroupCommand(session *gandr.Session, command string) tea.Cmd {
+// unlockAndOpenGandrGroup unlocks id with password and opens it, without
+// round-tripping the password through gandrGroupCommand's space-delimited
+// command parser — used by the click-a-locked-group-to-unlock-it flow,
+// where the password comes straight from the input field and may contain
+// spaces.
+func unlockAndOpenGandrGroup(session *gandr.Session, id [32]byte, password string) tea.Cmd {
+	return func() tea.Msg {
+		if err := session.UnlockPrivateGroup(id, password); err != nil {
+			return gandrGroupMsg{err: err}
+		}
+		messages, err := session.PrivateGroupMessages(id, 200)
+		groups, _ := session.PrivateGroups()
+		return gandrGroupMsg{groups: groups, active: &id, messages: messages, err: err}
+	}
+}
+
+// openGandrGroup opens a group that is already unlocked in this session
+// (its key is cached from an earlier create/unlock), so clicking it a
+// second time — or clicking any group unlocked earlier in the same run —
+// does not re-prompt for the password.
+func openGandrGroup(session *gandr.Session, id [32]byte) tea.Cmd {
+	return func() tea.Msg {
+		if !session.IsGroupUnlocked(id) {
+			return gandrGroupMsg{err: fmt.Errorf("gruppen är låst")}
+		}
+		messages, err := session.PrivateGroupMessages(id, 200)
+		groups, _ := session.PrivateGroups()
+		return gandrGroupMsg{groups: groups, active: &id, messages: messages, err: err}
+	}
+}
+
+func gandrGroupCommand(session *gandr.Session, active *[32]byte, command string) tea.Cmd {
 	return func() tea.Msg {
 		parts := strings.Fields(command)
 		if len(parts) < 2 {
-			return gandrGroupMsg{err: fmt.Errorf("använd: /grupp skapa, /grupp öppna eller /grupp lista")}
+			return gandrGroupMsg{err: fmt.Errorf("använd: /grupp skapa, /grupp öppna, /grupp bjud eller /grupp lista")}
 		}
 		switch parts[1] {
 		case "lista":
@@ -2155,21 +2602,65 @@ func gandrGroupCommand(session *gandr.Session, command string) tea.Cmd {
 			groups, _ := session.PrivateGroups()
 			return gandrGroupMsg{groups: groups, active: &group.ID}
 		case "öppna":
-			if len(parts) != 4 {
-				return gandrGroupMsg{err: fmt.Errorf("använd: /grupp öppna ID LÖSENORD")}
-			}
-			decoded, err := hex.DecodeString(parts[2])
-			if err != nil || len(decoded) != 32 {
-				return gandrGroupMsg{err: fmt.Errorf("grupp-ID ska vara 64 hextecken")}
-			}
 			var id [32]byte
-			copy(id[:], decoded)
-			if err := session.UnlockPrivateGroup(id, parts[3]); err != nil {
+			var password string
+			switch {
+			case len(parts) == 3 && gandr.IsGroupInvite(parts[2]):
+				// /grupp öppna <inbjudan> — the invite string already
+				// carries both the ID and the password, so there is
+				// nothing left to type or look up by hand.
+				decodedID, _, decodedPassword, err := gandr.DecodeGroupInvite(parts[2])
+				if err != nil {
+					return gandrGroupMsg{err: fmt.Errorf("ogiltig inbjudan: %w", err)}
+				}
+				id, password = decodedID, decodedPassword
+			case len(parts) == 4:
+				decoded, err := hex.DecodeString(parts[2])
+				if err != nil || len(decoded) != 32 {
+					return gandrGroupMsg{err: fmt.Errorf("grupp-ID ska vara 64 hextecken")}
+				}
+				copy(id[:], decoded)
+				password = parts[3]
+			default:
+				return gandrGroupMsg{err: fmt.Errorf("använd: /grupp öppna ID LÖSENORD eller /grupp öppna INBJUDAN")}
+			}
+			if err := session.UnlockPrivateGroup(id, password); err != nil {
 				return gandrGroupMsg{err: err}
 			}
 			messages, err := session.PrivateGroupMessages(id, 200)
 			groups, _ := session.PrivateGroups()
 			return gandrGroupMsg{groups: groups, active: &id, messages: messages, err: err}
+		case "bjud":
+			// /grupp bjud LÖSENORD — packages the *currently open* group's
+			// ID, name and the given password into one shareable string.
+			// The password is never stored after creation/unlock (only a
+			// password-derived key is), so it has to be re-typed here; this
+			// still spares the recipient from copying a 64-character ID.
+			if active == nil {
+				return gandrGroupMsg{err: fmt.Errorf("öppna gruppen du vill bjuda in till först")}
+			}
+			if len(parts) != 3 {
+				return gandrGroupMsg{err: fmt.Errorf("använd: /grupp bjud LÖSENORD")}
+			}
+			if err := session.UnlockPrivateGroup(*active, parts[2]); err != nil {
+				return gandrGroupMsg{err: fmt.Errorf("fel lösenord, ingen inbjudan skapades: %w", err)}
+			}
+			groups, err := session.PrivateGroups()
+			if err != nil {
+				return gandrGroupMsg{err: err}
+			}
+			name := ""
+			for _, g := range groups {
+				if g.ID == *active {
+					name = g.Name
+					break
+				}
+			}
+			invite, err := gandr.EncodeGroupInvite(*active, name, parts[2])
+			if err != nil {
+				return gandrGroupMsg{err: err}
+			}
+			return gandrGroupMsg{groups: groups, active: active, invite: invite}
 		case "stäng":
 			groups, err := session.PrivateGroups()
 			return gandrGroupMsg{groups: groups, err: err}
@@ -2313,9 +2804,10 @@ func loadRoot(s *store.Store, c *flashback.Client) tea.Cmd {
 			defer rows.Close()
 			for rows.Next() {
 				var n flashback.ForumNode
-				var child int
-				if e := rows.Scan(&n.ID, &n.Title, &n.URL, &child); e == nil {
+				var child, browsable int
+				if e := rows.Scan(&n.ID, &n.Title, &n.URL, &child, &browsable); e == nil {
 					n.HasChildren = child != 0
+					n.Browsable = browsable != 0
 					out = append(out, n)
 				}
 			}
@@ -2326,7 +2818,7 @@ func loadRoot(s *store.Store, c *flashback.Client) tea.Cmd {
 		}
 		nodes, e := c.Forum(context.Background(), flashback.BaseURL)
 		if e == nil {
-			_ = s.SaveForums(nodes)
+			_ = s.ReplaceForumSnapshot(nodes)
 			_ = s.SetExternalSyncState(external.SyncState{Source: navigationSource, LastSyncedAt: time.Now(), Status: "ok"})
 		}
 		return dataMsg{kind: "forums", forums: nodes, err: e}
@@ -2346,15 +2838,25 @@ func loadChildren(s *store.Store, stack []flashback.ForumNode) tea.Cmd {
 		var out []flashback.ForumNode
 		for rows.Next() {
 			var n flashback.ForumNode
-			var child int
-			if e := rows.Scan(&n.ID, &n.Title, &n.URL, &child); e == nil {
+			var child, browsable int
+			if e := rows.Scan(&n.ID, &n.Title, &n.URL, &child, &browsable); e == nil {
 				n.HasChildren = child != 0
+				n.Browsable = browsable != 0
 				out = append(out, n)
 			}
 		}
 		return dataMsg{kind: "forums", forums: out}
 	}
 }
+
+// isCategory reports whether n is a local sitemap category node rather than
+// a real Flashback forum. Category nodes are never browsable, so this is the
+// single source of truth instead of matching on the "category:" URL sentinel
+// at each call site.
+func isCategory(n flashback.ForumNode) bool {
+	return !n.Browsable
+}
+
 func loadForumChildren(s *store.Store, c *flashback.Client, n flashback.ForumNode) tea.Cmd {
 	return func() tea.Msg {
 		rows, e := s.Forums(n.ID)
@@ -2363,16 +2865,27 @@ func loadForumChildren(s *store.Store, c *flashback.Client, n flashback.ForumNod
 			var out []flashback.ForumNode
 			for rows.Next() {
 				var child flashback.ForumNode
-				var hasChildren int
-				if scanErr := rows.Scan(&child.ID, &child.Title, &child.URL, &hasChildren); scanErr == nil {
+				var hasChildren, browsable int
+				if scanErr := rows.Scan(&child.ID, &child.Title, &child.URL, &hasChildren, &browsable); scanErr == nil {
 					child.HasChildren = hasChildren != 0
+					child.Browsable = browsable != 0
 					out = append(out, child)
 				}
 			}
 			if len(out) > 0 {
+				if isCategory(n) {
+					return dataMsg{kind: "forums", forums: out}
+				}
 				state, _ := s.ExternalSyncState(navigationSource + ":" + n.ID)
 				return dataMsg{kind: "forums", forums: out, refresh: state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 24*time.Hour, refreshURL: n.URL, refreshParent: n.ID}
 			}
+		}
+		// Sitemap categories are local structural nodes and intentionally have
+		// no Flashback URL. If an older cache has not materialised their
+		// children yet, refresh the complete sitemap and read the children back
+		// from SQLite instead of sending "category:..." to net/http.
+		if isCategory(n) {
+			return refreshCategoryNavigation(s, c, n)()
 		}
 		if cached, err := cachedThreads(s, n.ID); err == nil && len(cached) > 0 {
 			state, _ := s.ExternalSyncState("flashback:threads:" + n.ID)
@@ -2435,7 +2948,7 @@ func refreshNavigation(s *store.Store, c *flashback.Client, rawURL string) tea.C
 		if err != nil {
 			return dataMsg{kind: "forums", err: err}
 		}
-		if err = s.SaveForums(nodes); err != nil {
+		if err = s.ReplaceForumSnapshot(nodes); err != nil {
 			return dataMsg{kind: "forums", err: err}
 		}
 		_ = s.SetExternalSyncState(external.SyncState{Source: navigationSource, LastSyncedAt: time.Now(), Status: "ok"})
@@ -2449,6 +2962,35 @@ func refreshNavigation(s *store.Store, c *flashback.Client, rawURL string) tea.C
 			}
 		}
 		return dataMsg{kind: "forums", forums: roots}
+	}
+}
+
+func refreshCategoryNavigation(s *store.Store, c *flashback.Client, category flashback.ForumNode) tea.Cmd {
+	return func() tea.Msg {
+		nodes, err := c.Forum(context.Background(), flashback.BaseURL)
+		if err != nil {
+			return dataMsg{kind: "forums", err: err}
+		}
+		if err = s.ReplaceForumSnapshot(nodes); err != nil {
+			return dataMsg{kind: "forums", err: err}
+		}
+		rows, err := s.Forums(category.ID)
+		if err != nil {
+			return dataMsg{kind: "forums", err: err}
+		}
+		defer rows.Close()
+		var children []flashback.ForumNode
+		for rows.Next() {
+			var child flashback.ForumNode
+			var hasChildren, browsable int
+			if err := rows.Scan(&child.ID, &child.Title, &child.URL, &hasChildren, &browsable); err != nil {
+				return dataMsg{kind: "forums", err: err}
+			}
+			child.HasChildren = hasChildren != 0
+			child.Browsable = browsable != 0
+			children = append(children, child)
+		}
+		return dataMsg{kind: "forums", forums: children}
 	}
 }
 
@@ -2470,11 +3012,12 @@ func refreshForumNavigation(s *store.Store, c *flashback.Client, rawURL, parentI
 		var children []flashback.ForumNode
 		for rows.Next() {
 			var child flashback.ForumNode
-			var hasChildren int
-			if scanErr := rows.Scan(&child.ID, &child.Title, &child.URL, &hasChildren); scanErr != nil {
+			var hasChildren, browsable int
+			if scanErr := rows.Scan(&child.ID, &child.Title, &child.URL, &hasChildren, &browsable); scanErr != nil {
 				return dataMsg{kind: "forums", err: scanErr}
 			}
 			child.HasChildren = hasChildren != 0
+			child.Browsable = browsable != 0
 			children = append(children, child)
 		}
 		return dataMsg{kind: "forums", forums: children}

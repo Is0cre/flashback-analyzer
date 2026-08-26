@@ -2,6 +2,7 @@ package flashback
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,17 @@ import (
 
 	"github.com/backflash-cli/backflash/internal/diagnostics"
 )
+
+// embeddedSitemap is a checked-in snapshot of Flashback's own sitemap
+// (https://www.flashback.org/sitemap/index.php/). The full forum tree is
+// effectively static, so root navigation is built from this local copy
+// instead of fetching and re-parsing that page over the network on every
+// refresh. Update assets/sitemap.html when Flashback adds or renames forums.
+//
+//go:embed assets/sitemap.html
+var embeddedSitemap string
+
+const sitemapSourceURL = BaseURL + "sitemap/index.php/"
 
 type Client struct {
 	HTTP      *http.Client
@@ -50,6 +62,18 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 }
 
 func (c *Client) Forum(ctx context.Context, rawURL string) ([]ForumNode, error) {
+	// The sitemap is the complete, nested forum tree. Use the embedded
+	// snapshot for root navigation so subforums are available even when the
+	// front page only renders a partial menu, and no network round trip is
+	// needed just to rebuild the (effectively static) top-level tree. Forum
+	// pages themselves continue to use their normal navigation markup and
+	// thread listing, fetched live as before.
+	if NormalizeURL(rawURL, BaseURL) == BaseURL {
+		nodes, err := ParseSitemapNavigation(embeddedSitemap, sitemapSourceURL)
+		if err == nil && len(nodes) > 0 {
+			return nodes, nil
+		}
+	}
 	body, err := c.Fetch(ctx, rawURL)
 	if err != nil {
 		return nil, err

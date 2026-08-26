@@ -360,6 +360,17 @@ func (s *Session) UnlockPrivateGroup(id [32]byte, password string) error {
 	return errors.New("gruppen finns inte lokalt")
 }
 
+// IsGroupUnlocked reports whether id's key is already cached in this
+// session (from an earlier CreatePrivateGroup or UnlockPrivateGroup call in
+// the same run), so the caller can skip re-prompting for the password.
+func (s *Session) IsGroupUnlocked(id [32]byte) bool {
+	if s == nil {
+		return false
+	}
+	_, ok := s.groups[id]
+	return ok
+}
+
 func (s *Session) SendPrivateGroup(id [32]byte, content string) (PrivateGroupMessage, error) {
 	key, ok := s.groups[id]
 	if !ok {

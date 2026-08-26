@@ -77,8 +77,42 @@ func (s *Store) SaveForums(nodes []flashback.ForumNode) error {
 		if n.ParentID != "" {
 			parent = n.ParentID
 		}
-		_, err = tx.Exec(`INSERT INTO forums(id,title,url,parent_id,depth,sort_order,has_children,browsable,last_seen_at) VALUES(?,?,?,?,?,?,?,? ,CURRENT_TIMESTAMP) ON CONFLICT(url) DO UPDATE SET title=excluded.title,parent_id=excluded.parent_id,depth=excluded.depth,sort_order=excluded.sort_order,has_children=excluded.has_children,last_seen_at=CURRENT_TIMESTAMP`, n.ID, n.Title, n.URL, parent, n.Depth, n.SortOrder, n.HasChildren, n.Browsable)
+		// Forum IDs are the stable identity. Flashback has exposed the same
+		// forum through more than one URL shape (notably sitemap links), so an
+		// URL-only upsert can fail on the primary key during a tree refresh.
+		// The url column is still UNIQUE, so a stale row left behind under a
+		// different id must be cleared first or the id-keyed upsert below
+		// would fail the url constraint instead of replacing it.
+		if _, err = tx.Exec(`DELETE FROM forums WHERE url=? AND id<>?`, n.URL, n.ID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`INSERT INTO forums(id,title,url,parent_id,depth,sort_order,has_children,browsable,last_seen_at) VALUES(?,?,?,?,?,?,?,? ,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET title=excluded.title,url=excluded.url,parent_id=excluded.parent_id,depth=excluded.depth,sort_order=excluded.sort_order,has_children=excluded.has_children,browsable=excluded.browsable,last_seen_at=CURRENT_TIMESTAMP`, n.ID, n.Title, n.URL, parent, n.Depth, n.SortOrder, n.HasChildren, n.Browsable)
 		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ReplaceForumSnapshot stores a complete navigation snapshot. Unlike
+// SaveForums, this also removes forum rows that are no longer present. This
+// is deliberately separate because partial forum-page refreshes must not
+// remove unrelated cached branches.
+func (s *Store) ReplaceForumSnapshot(nodes []flashback.ForumNode) error {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`DELETE FROM forums`); err != nil {
+		return err
+	}
+	for _, n := range nodes {
+		var parent any
+		if n.ParentID != "" {
+			parent = n.ParentID
+		}
+		if _, err = tx.Exec(`INSERT INTO forums(id,title,url,parent_id,depth,sort_order,has_children,browsable,last_seen_at) VALUES(?,?,?,?,?,?,?,? ,CURRENT_TIMESTAMP)`, n.ID, n.Title, n.URL, parent, n.Depth, n.SortOrder, n.HasChildren, n.Browsable); err != nil {
 			return err
 		}
 	}
@@ -143,9 +177,12 @@ func (s *Store) TrackedThreads() (*sql.Rows, error) {
 }
 func (s *Store) Forums(parent string) (*sql.Rows, error) {
 	if parent == "" {
-		return s.DB.Query(`SELECT id,title,url,has_children FROM forums WHERE parent_id IS NULL ORDER BY sort_order`)
+		// Older navigation snapshots accidentally stored every sitemap node as
+		// a root. Keep those rows available for repair, but never render them
+		// in the root menu: only actual depth-zero nodes belong there.
+		return s.DB.Query(`SELECT id,title,url,has_children,browsable FROM forums WHERE parent_id IS NULL AND depth=0 ORDER BY sort_order`)
 	}
-	return s.DB.Query(`SELECT id,title,url,has_children FROM forums WHERE parent_id=? ORDER BY sort_order`, parent)
+	return s.DB.Query(`SELECT id,title,url,has_children,browsable FROM forums WHERE parent_id=? ORDER BY sort_order`, parent)
 }
 func (s *Store) Posts(threadID string) (*sql.Rows, error) {
 	return s.DB.Query(`SELECT id,author,timestamp,text FROM posts WHERE thread_id=? ORDER BY page,position,id`, threadID)

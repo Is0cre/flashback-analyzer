@@ -94,6 +94,51 @@ func TestForumRootsUseSQLNullAndNestedForumsRemainReachable(t *testing.T) {
 	}
 }
 
+func TestForumUpsertUsesStableIDAcrossURLShapes(t *testing.T) {
+	s, _ := openTestStore(t)
+	if err := s.SaveForums([]flashback.ForumNode{{ID: "1555", Title: "AI", URL: "https://www.flashback.org/f1555"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveForums([]flashback.ForumNode{{ID: "1555", Title: "AI", URL: "https://www.flashback.org/f1555-ai"}}); err != nil {
+		t.Fatalf("forum med samma ID skulle uppdateras: %v", err)
+	}
+	var count int
+	var url string
+	if err := s.DB.QueryRow(`SELECT COUNT(*), MAX(url) FROM forums WHERE id=?`, "1555").Scan(&count, &url); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || url != "https://www.flashback.org/f1555-ai" {
+		t.Fatalf("forum-upsert blev fel: antal=%d url=%q", count, url)
+	}
+}
+
+func TestForumUpsertReplacesStaleRowWithSameURLUnderDifferentID(t *testing.T) {
+	s, _ := openTestStore(t)
+	if err := s.SaveForums([]flashback.ForumNode{{ID: "old-id", Title: "Gammal", URL: "https://www.flashback.org/f100"}}); err != nil {
+		t.Fatal(err)
+	}
+	// A later parse can hand back the same URL under a different id (e.g. a
+	// forum re-issued with a new numeric id). The url column is still
+	// UNIQUE, so this must not fail the whole batch on that constraint.
+	if err := s.SaveForums([]flashback.ForumNode{{ID: "new-id", Title: "Ny", URL: "https://www.flashback.org/f100"}}); err != nil {
+		t.Fatalf("upsert med samma URL under nytt ID skulle lyckas: %v", err)
+	}
+	var count int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM forums WHERE url=?`, "https://www.flashback.org/f100").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("förväntade en rad kvar för URL:en, fick %d", count)
+	}
+	var id string
+	if err := s.DB.QueryRow(`SELECT id FROM forums WHERE url=?`, "https://www.flashback.org/f100").Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if id != "new-id" {
+		t.Fatalf("förväntade new-id att äga URL:en, fick %q", id)
+	}
+}
+
 func TestMigrationRepairsLegacyEmptyForumParent(t *testing.T) {
 	s, _ := openTestStore(t)
 	if _, err := s.DB.Exec(`INSERT INTO forums(id,title,url,parent_id) VALUES('legacy','Gammalt','https://www.flashback.org/flegacy','')`); err != nil {
@@ -161,5 +206,64 @@ func TestCachedThreadQueryUsesForumPositionIndex(t *testing.T) {
 	}
 	if !strings.Contains(detail, "idx_forum_threads_forum_position") && !strings.Contains(detail, "forum_threads") {
 		t.Fatalf("forum query saknar väntad index/tabellplan: %s", detail)
+	}
+}
+
+func TestReplaceForumSnapshotRemovesLegacyFlatRoots(t *testing.T) {
+	s, _ := openTestStore(t)
+	if err := s.SaveForums([]flashback.ForumNode{
+		{ID: "1", Title: "Gammal rot", URL: "/f1", Depth: 0},
+		{ID: "2", Title: "Gammalt underforum", URL: "/f2", Depth: 0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceForumSnapshot([]flashback.ForumNode{
+		{ID: "1", Title: "Ny rot", URL: "/f1", Depth: 0},
+		{ID: "2", Title: "Rätt underforum", URL: "/f2", ParentID: "1", Depth: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.Forums("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id, title, url string
+		var children, browsable int
+		if err := rows.Scan(&id, &title, &url, &children, &browsable); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) != 1 || ids[0] != "1" {
+		t.Fatalf("förväntade en rot efter snapshot, fick %v", ids)
+	}
+}
+
+func TestForumsQueryRoundTripsBrowsable(t *testing.T) {
+	s, _ := openTestStore(t)
+	if err := s.ReplaceForumSnapshot([]flashback.ForumNode{
+		{ID: "1", Title: "Kategori", URL: "category:kategori", Depth: 0, Browsable: false},
+		{ID: "2", Title: "Forum", URL: "/f2", ParentID: "1", Depth: 1, Browsable: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.Forums("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatal("förväntade en rotrad")
+	}
+	var id, title, url string
+	var children, browsable int
+	if err := rows.Scan(&id, &title, &url, &children, &browsable); err != nil {
+		t.Fatal(err)
+	}
+	if browsable != 0 {
+		t.Fatalf("kategorin skulle lagras som icke-browsable, fick browsable=%d", browsable)
 	}
 }

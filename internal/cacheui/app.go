@@ -27,13 +27,17 @@ type Model struct {
 	StartedAt time.Time
 }
 
+// Same palette and meanings as internal/tui/app.go (brand/accent/ok/warn ↔
+// its brand/accent/online/warning), so BACKFLASH and its cache peer console
+// read as one consistent system instead of two differently-themed tools.
 var (
-	brand  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("81"))
-	accent = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
-	ok     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
-	warn   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	dim    = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	box    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("238")).Padding(0, 1)
+	brand    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("75"))  // sky blue
+	accent   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("215")) // peach
+	ok       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("108")) // sage green
+	warn     = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))            // muted gold
+	critical = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("167")) // muted brick red
+	dim      = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	box      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("238")).Padding(0, 1)
 )
 
 func New(runtime *meshruntime.Runtime, cfg mesh.Config) Model {
@@ -130,7 +134,7 @@ func health(snapshot meshruntime.Snapshot) string {
 	case meshruntime.Degraded:
 		return warn.Render("DEGRADED")
 	case meshruntime.Error:
-		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196")).Render("FEL")
+		return critical.Render("FEL")
 	default:
 		return dim.Render("—")
 	}

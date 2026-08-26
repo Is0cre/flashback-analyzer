@@ -82,6 +82,106 @@ func ParseNavigation(html, sourceURL string) ([]ForumNode, error) {
 	return nodes, nil
 }
 
+// ParseSitemapNavigation reads only the sitemap's forum links. Flashback's
+// real sitemap markup places a node's children as a *following sibling* li
+// that holds nothing but a nested <ul> — never nested inside the node's own
+// <li> — so parentage is tracked by walking each <ul>'s direct <li> children
+// in document order and attaching a bare "<li><ul>...</ul></li>" wrapper to
+// whichever node came immediately before it. User, thread, breadcrumb and
+// utility links are excluded by both the sitemap URL form and this scope.
+func ParseSitemapNavigation(html, sourceURL string) ([]ForumNode, error) {
+	html = decodeHTML(html)
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err != nil {
+		return nil, err
+	}
+	var nodes []ForumNode
+	seen := map[string]bool{}
+	root := doc.Find("#content").First()
+	if root.Length() == 0 {
+		root = doc.Find("#forum-sitemap").First()
+	}
+	if root.Length() == 0 {
+		root = doc.Selection
+	}
+	var walk func(*goquery.Selection, string, int, string)
+	walk = func(list *goquery.Selection, parent string, depth int, path string) {
+		lastIdx := -1
+		var lastID, lastPath string
+		list.ChildrenFiltered("li").Each(func(_ int, li *goquery.Selection) {
+			nested := li.ChildrenFiltered("ul, ol").First()
+			anchor := li.ChildrenFiltered("a[href]").First()
+			if anchor.Length() == 0 {
+				// Some sitemap rows wrap their own forum anchor in a span. Do
+				// not use li.Find here: that would select the first child
+				// forum link from a nested list and flatten the hierarchy.
+				anchor = li.ChildrenFiltered("span").Find("a[href]").First()
+			}
+			label := li.Clone()
+			label.Find("ul, ol").Remove()
+			label.ChildrenFiltered("a").Remove()
+			title := clean(label.Text())
+			if nested.Length() > 0 && anchor.Length() == 0 && title == "" {
+				// A pure wrapper li: it holds only the previous sibling's
+				// children, it is not a node of its own.
+				if lastIdx >= 0 {
+					nodes[lastIdx].HasChildren = true
+					walk(nested, lastID, depth+1, lastPath)
+				}
+				return
+			}
+			href := anchor.AttrOr("href", "")
+			id, nodeURL := "", ""
+			browsable := true
+			if href != "" && ClassifyURL(href, sourceURL) == LinkForum {
+				if title == "" {
+					title = clean(anchor.Text())
+				}
+				nodeURL = CanonicalForumURL(NormalizeURL(href, sourceURL))
+				id = ForumID(nodeURL)
+			} else if title != "" {
+				// Category nodes are local structural objects. They are never
+				// sent to Flashback and cannot be confused with forum/user
+				// URLs. sitemapCategoryID already returns a "category:"
+				// prefixed key, so it is used directly as the URL.
+				id = sitemapCategoryID(path, title)
+				nodeURL = id
+				browsable = false
+			} else {
+				lastIdx = -1
+				return
+			}
+			if id == "" || seen[id] {
+				lastIdx = -1
+				return
+			}
+			nodes = append(nodes, ForumNode{ID: id, Title: title, URL: nodeURL, ParentID: parent, Depth: depth, SortOrder: len(nodes), Browsable: browsable})
+			seen[id] = true
+			lastIdx = len(nodes) - 1
+			lastID = id
+			if path == "" {
+				lastPath = title
+			} else {
+				lastPath = path + "/" + title
+			}
+			// Defensive fallback for markup variants that nest children
+			// inside the node's own li instead of a following sibling.
+			if nested.Length() > 0 {
+				nodes[lastIdx].HasChildren = true
+				walk(nested, id, depth+1, lastPath)
+			}
+		})
+	}
+	walk(root.Find("ul, ol").First(), "", 0, "")
+	return nodes, nil
+}
+
+func sitemapCategoryID(path, title string) string {
+	key := strings.ToLower(strings.TrimSpace(path + "/" + title))
+	key = strings.Join(strings.Fields(key), "-")
+	return "category:" + key
+}
+
 func mustAttr(s *goquery.Selection, key string) string { v, _ := s.Attr(key); return v }
 
 func ParseThreadListing(html, sourceURL, forumID string) ([]ThreadSummary, error) {

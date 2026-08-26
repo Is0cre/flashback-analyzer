@@ -3,6 +3,7 @@ package flashback
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -45,6 +46,70 @@ func TestParseNestedNavigation(t *testing.T) {
 	}
 	if len(nodes) != 1 || nodes[0].ParentID != "12" {
 		t.Fatalf("unexpected nested nodes: %#v", nodes)
+	}
+}
+
+func TestParseSitemapNavigationPreservesNestedForumTree(t *testing.T) {
+	// Flashback's real sitemap places a node's children as a following
+	// sibling <li><ul>...</ul></li>, never nested inside its own <li>, and
+	// top-level category labels (<strong>, no href) are not forums. See
+	// tests/fixtures/sitemap_navigation.html.
+	nodes, err := ParseSitemapNavigation(fixture(t, "sitemap_navigation.html"), BaseURL+"sitemap/index.php/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 6 {
+		t.Fatalf("got %d sitemap forums, want 6: %#v", len(nodes), nodes)
+	}
+	if nodes[0].Title != "Dator och IT" || nodes[0].ParentID != "" || nodes[0].Browsable {
+		t.Fatalf("root category parsed incorrectly: %#v", nodes[0])
+	}
+	if nodes[1].Title != "AI - Artificiell intelligens" || nodes[1].ParentID != nodes[0].ID || nodes[1].URL != BaseURL+"f555" {
+		t.Fatalf("category child parsed incorrectly: %#v", nodes[1])
+	}
+	if nodes[2].Title != "Dator- och konsolspel" || nodes[2].ParentID != nodes[0].ID || nodes[2].URL != BaseURL+"f245" {
+		t.Fatalf("second category child parsed incorrectly: %#v", nodes[2])
+	}
+	if nodes[3].Title != "Retrospel" || nodes[3].ParentID != "245" {
+		t.Fatalf("deep forum parent parsed incorrectly: %#v", nodes[3])
+	}
+	if nodes[5].Title != "Felix042" || nodes[5].ParentID != "" {
+		t.Fatalf("standalone root forum received an unexpected parent: %#v", nodes[5])
+	}
+	for _, bad := range []string{"PeterNoster", "En tråd", "Sök"} {
+		for _, node := range nodes {
+			if node.Title == bad {
+				t.Fatalf("unrelated sitemap link leaked into forum tree: %s", bad)
+			}
+		}
+	}
+}
+
+func TestClassifySitemapForumURL(t *testing.T) {
+	if got := ClassifyURL("/sitemap/index.php/f-555.html", BaseURL); got != LinkForum {
+		t.Fatalf("sitemap forum link classified as %v", got)
+	}
+	if got := CanonicalForumURL(BaseURL + "sitemap/index.php/f-555.html"); got != BaseURL+"f555" {
+		t.Fatalf("sitemap forum URL not canonicalised: %q", got)
+	}
+}
+
+func TestParseSitemapNavigationKeepsUnlinkedCategoryParents(t *testing.T) {
+	html := `<nav id="forum-sitemap"><ul>
+		<li>Droger<ul>
+			<li><a href="/sitemap/index.php/f-10.html">Bensodiazepiner</a></li>
+			<li><a href="/sitemap/index.php/f-11.html">Cannabis</a></li>
+		</ul></li>
+	</ul></nav><div><a href="/u99">Bensodiazepiner</a></div>`
+	nodes, err := ParseSitemapNavigation(html, BaseURL+"sitemap/index.php/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 3 || nodes[0].Title != "Droger" || nodes[0].Browsable || nodes[1].ParentID != nodes[0].ID || nodes[2].ParentID != nodes[0].ID {
+		t.Fatalf("kategori/underforum parsades fel: %#v", nodes)
+	}
+	if nodes[0].URL != nodes[0].ID || strings.Contains(nodes[0].URL, "category:category:") {
+		t.Fatalf("kategori-URL fick dubbelt prefix: id=%q url=%q", nodes[0].ID, nodes[0].URL)
 	}
 }
 

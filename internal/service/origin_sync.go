@@ -124,6 +124,20 @@ func (s *OriginSync) syncForumWithChildren(ctx context.Context, forum flashback.
 	if err != nil {
 		return 0, nil, fmt.Errorf("hämta %s: %w", forum.URL, err)
 	}
+	// MaxPages only extends the thread listing: subforum discovery always
+	// comes from page 1's navigation, matching Flashback's own layout.
+	for page := 2; page <= s.MaxPages; page++ {
+		if err := s.Limiter.Wait(ctx); err != nil {
+			return 0, nil, err
+		}
+		more, err := s.Client.ThreadsPage(ctx, forum, page)
+		if err != nil || len(more) == 0 {
+			// A short forum has fewer pages than MaxPages; that is not a
+			// sync failure, so stop paginating instead of erroring out.
+			break
+		}
+		threads = append(threads, more...)
+	}
 	now := s.Now()
 	payload, err := json.Marshal(ForumSnapshot{Forum: forum, Children: children, Threads: threads, FetchedAt: now})
 	if err != nil {

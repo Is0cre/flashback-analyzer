@@ -8,6 +8,10 @@ import (
 
 var (
 	forumPath = regexp.MustCompile(`(?i)^/f([0-9]+)(-[^/]*)?$`)
+	// The public Flashback sitemap uses /sitemap/index.php/f-123.html for
+	// forum nodes. It is a forum link, but must be canonicalised to /f123
+	// before it is used for browsing or thread retrieval.
+	sitemapForumPath = regexp.MustCompile(`(?i)^/sitemap/index\.php/f-([0-9]+)\.html$`)
 	// Flashback uses the same thread route for the normal title, page links,
 	// the thread status link (n) and the latest-post shortcut (s/lp).
 	threadPath = regexp.MustCompile(`(?i)^/t([0-9]+)(p[0-9]+|n|s|lp)?(-[^/]*)?$`)
@@ -48,7 +52,7 @@ func ClassifyURL(href, base string) LinkType {
 		return LinkOther
 	}
 	path := u.Path
-	if forumPath.MatchString(path) || u.Query().Get("f") != "" {
+	if forumPath.MatchString(path) || sitemapForumPath.MatchString(path) || u.Query().Get("f") != "" {
 		return LinkForum
 	}
 	if strings.HasSuffix(strings.ToLower(path), "lp") && strings.HasPrefix(strings.ToLower(path), "/f") || userPath.MatchString(path) {
@@ -71,7 +75,27 @@ func ForumID(raw string) string {
 	if m := forumPath.FindStringSubmatch(u.Path); len(m) >= 2 {
 		return m[1]
 	}
+	if m := sitemapForumPath.FindStringSubmatch(u.Path); len(m) >= 2 {
+		return m[1]
+	}
 	return u.Query().Get("f")
+}
+
+// CanonicalForumURL turns sitemap forum links into normal Flashback forum
+// URLs. This prevents the sitemap representation from leaking into the
+// browse/fetch path while preserving the IDs and nesting parsed from it.
+func CanonicalForumURL(rawURL string) string {
+	u, err := url.Parse(NormalizeURL(rawURL, BaseURL))
+	if err != nil {
+		return rawURL
+	}
+	if m := sitemapForumPath.FindStringSubmatch(u.Path); len(m) >= 2 {
+		u.Path = "/f" + m[1]
+		u.RawQuery = ""
+		u.Fragment = ""
+		return u.String()
+	}
+	return u.String()
 }
 
 func ThreadID(raw string) string {

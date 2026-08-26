@@ -95,7 +95,7 @@ func (s *Store) SaveThreads(forumID string, rows []flashback.ThreadSummary) erro
 		if strings.TrimSpace(r.Title) == "" {
 			continue
 		}
-		_, err = tx.Exec(`INSERT INTO threads(id,title,url,forum_id,replies,views,last_post_at,last_post_author,sticky,page_count,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET title=excluded.title,url=excluded.url,forum_id=excluded.forum_id,replies=excluded.replies,views=excluded.views,last_post_at=excluded.last_post_at,last_post_author=excluded.last_post_author,sticky=excluded.sticky,page_count=excluded.page_count,last_seen_at=CURRENT_TIMESTAMP`, r.ID, r.Title, r.URL, forumID, r.Replies, r.Views, r.LastPostAt, r.LastPostAuthor, r.Sticky, r.PageCount)
+		_, err = tx.Exec(`INSERT INTO threads(id,title,url,forum_id,replies,views,last_post_at,last_post_author,sticky,page_count,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET title=excluded.title,url=excluded.url,forum_id=excluded.forum_id,replies=excluded.replies,views=excluded.views,last_post_at=excluded.last_post_at,last_post_author=excluded.last_post_author,sticky=excluded.sticky,page_count=CASE WHEN excluded.page_count>0 THEN excluded.page_count ELSE threads.page_count END,last_seen_at=CURRENT_TIMESTAMP`, r.ID, r.Title, r.URL, forumID, r.Replies, r.Views, r.LastPostAt, r.LastPostAuthor, r.Sticky, r.PageCount)
 		if err != nil {
 			return err
 		}

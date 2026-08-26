@@ -275,6 +275,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.ThreadTitle = m.threadTitle
 			}
 			a.refreshPostViewport(true)
+			if m.refresh && m.refreshURL != "" {
+				return a, loadThreadPage(a.Store, a.Client, a.ThreadID, 1)
+			}
 		case "search":
 			a.Results, a.CurrentView = m.results, ViewRemoteSearch
 		case "events":
@@ -2373,7 +2376,7 @@ func loadForumChildren(s *store.Store, c *flashback.Client, n flashback.ForumNod
 		}
 		if cached, err := cachedThreads(s, n.ID); err == nil && len(cached) > 0 {
 			state, _ := s.ExternalSyncState("flashback:threads:" + n.ID)
-			return dataMsg{kind: "threads", threads: cached, refresh: state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 10*time.Minute, refreshURL: n.URL}
+			return dataMsg{kind: "threads", threads: cached, refresh: needsThreadMetadata(cached) || state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 10*time.Minute, refreshURL: n.URL}
 		}
 		out, threads, forumErr := c.ForumPage(context.Background(), n)
 		if forumErr == nil && len(out) > 0 {
@@ -2415,6 +2418,15 @@ func cachedThreads(s *store.Store, forumID string) ([]flashback.ThreadSummary, e
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+func needsThreadMetadata(rows []flashback.ThreadSummary) bool {
+	for _, row := range rows {
+		if row.PageCount < 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func refreshNavigation(s *store.Store, c *flashback.Client, rawURL string) tea.Cmd {
@@ -2486,7 +2498,7 @@ func loadForum(s *store.Store, c *flashback.Client, n flashback.ForumNode) tea.C
 			}
 			if len(out) > 0 {
 				state, _ := s.ExternalSyncState("flashback:threads:" + n.ID)
-				return dataMsg{kind: "threads", threads: out, refresh: state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 10*time.Minute, refreshURL: n.URL}
+				return dataMsg{kind: "threads", threads: out, refresh: needsThreadMetadata(out) || state.LastSyncedAt.IsZero() || time.Since(state.LastSyncedAt) >= 10*time.Minute, refreshURL: n.URL}
 			}
 		}
 		threads, e := c.Threads(context.Background(), n)
@@ -2518,8 +2530,9 @@ func loadPosts(s *store.Store, c *flashback.Client, id string, meshRuntime *mesh
 		defer finish()
 		threadTitle := ""
 		pageCount := 0
+		threadURL := ""
 		if s != nil {
-			_ = s.DB.QueryRow(`SELECT title,page_count FROM threads WHERE id=?`, id).Scan(&threadTitle, &pageCount)
+			_ = s.DB.QueryRow(`SELECT title,page_count,url FROM threads WHERE id=?`, id).Scan(&threadTitle, &pageCount, &threadURL)
 		}
 		rows, e := s.Posts(id)
 		if e == nil {
@@ -2533,7 +2546,7 @@ func loadPosts(s *store.Store, c *flashback.Client, id string, meshRuntime *mesh
 				}
 			}
 			if len(out) > 0 {
-				return dataMsg{kind: "posts", posts: out, threadID: id, threadTitle: threadTitle, page: 1, pageCount: pageCount}
+				return dataMsg{kind: "posts", posts: out, threadID: id, threadTitle: threadTitle, page: 1, pageCount: pageCount, refresh: pageCount < 1, refreshURL: threadURL}
 			}
 		}
 		p, e := c.Thread(context.Background(), id, 1)

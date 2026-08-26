@@ -139,6 +139,9 @@ func TestParseThreadPage(t *testing.T) {
 	if page.Title != "Testtråd" || len(page.Posts) != 2 || page.Posts[0].Author != "Alice" || page.Posts[0].Timestamp.IsZero() || page.Posts[0].Timestamp.Hour() != 10 || page.MaxPage != 7 {
 		t.Fatalf("unexpected page: %#v", page)
 	}
+	if page.Posts[0].Text != "Jag tror att X stämmer. källa" || len(page.Posts[0].Quotes) != 1 {
+		t.Fatalf("quote was not separated from original text: %#v", page.Posts[0])
+	}
 }
 
 func TestParseThreadPageReadsTotalPagesFromFirstPageMetadata(t *testing.T) {

@@ -867,7 +867,7 @@ func (a *App) refreshPostViewport(reset bool) {
 		a.PostViewportReady = false
 		return
 	}
-	a.PostViewport.SetContent(renderPosts(a.Posts, a.Cursor))
+	a.PostViewport.SetContent(renderPostsWidth(a.Posts, a.Cursor, a.PostViewport.Width))
 	a.PostViewportReady = true
 	if reset {
 		a.PostViewport.GotoTop()
@@ -1351,15 +1351,19 @@ func renderThreads(xs []flashback.ThreadSummary, c int) string {
 	}
 	var b strings.Builder
 	for i, n := range xs {
-		prefix := "  "
+		prefix := fmt.Sprintf("%3d  ", i+1)
 		if n.Sticky {
-			prefix = pinStyle.Render("📌 ")
+			prefix = "📌 " + prefix
 		}
-		line := prefix + n.Title + "  " + metadata.Render(fmt.Sprintf("· %d svar", n.Replies))
+		line := prefix + firstNonEmpty(n.Title, "Tråd #"+n.ID)
 		if i == c {
 			line = selected.Render(line)
 		}
-		b.WriteString(line + "\n")
+		meta := fmt.Sprintf("      #%s · %s svar · %s visningar · %s sidor", n.ID, number(n.Replies), number(n.Views), pageCount(n.PageCount))
+		if i == c {
+			meta = selectedMeta.Render(meta)
+		}
+		b.WriteString(line + "\n" + meta + "\n")
 	}
 	return b.String()
 }
@@ -1446,15 +1450,60 @@ func pageCount(value int) string {
 	return number(value)
 }
 func renderPosts(xs []flashback.Post, c int) string {
+	return renderPostsWidth(xs, c, 120)
+}
+func renderPostsWidth(xs []flashback.Post, c, width int) string {
+	if width < 32 {
+		width = 32
+	}
 	var b strings.Builder
 	for i, n := range xs {
-		line := fmt.Sprintf("#%s  %s  %s\n    %s", n.ID, n.Author, formatPostTime(n.Timestamp), n.Text)
+		header := fmt.Sprintf("#%s  %s  %s", n.ID, firstNonEmpty(n.Author, "okänd användare"), formatPostTime(n.Timestamp))
 		if i == c {
-			line = selected.Render(line)
+			header = selected.Render(clip(header, width))
+		} else {
+			header = titleStyle.Render(clip(header, width))
 		}
-		b.WriteString(line + "\n")
+		b.WriteString(header + "\n")
+		for _, line := range wrapText(firstNonEmpty(n.Text, "(tomt inlägg)"), width-4) {
+			b.WriteString("  " + line + "\n")
+		}
+		for _, quote := range n.Quotes {
+			b.WriteString(muted.Render("  │ Citat: ") + muted.Render(clip(quote.Text, width-11)) + "\n")
+		}
+		if i+1 < len(xs) {
+			b.WriteString(metadata.Render(strings.Repeat("─", width)) + "\n")
+		}
 	}
 	return b.String()
+}
+
+func wrapText(value string, width int) []string {
+	if width < 1 {
+		return []string{""}
+	}
+	words := strings.Fields(value)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	lines := []string{}
+	line := ""
+	for _, word := range words {
+		if line == "" {
+			line = word
+			continue
+		}
+		if lipgloss.Width(line)+1+lipgloss.Width(word) <= width {
+			line += " " + word
+		} else {
+			lines = append(lines, line)
+			line = word
+		}
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 func formatPostTime(value time.Time) string {

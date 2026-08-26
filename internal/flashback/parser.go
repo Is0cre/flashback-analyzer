@@ -342,7 +342,16 @@ func ParseThreadPage(html, sourceURL, threadID string, page int) (ParsedPage, er
 		author := clean(post.Find(".post-user-username a, .post-user-username").First().Text())
 		msg := post.Find(".post_message").First()
 		raw := clean(msg.Text())
-		pageData.Posts = append(pageData.Posts, Post{ID: id, ThreadID: threadID, Author: author, Timestamp: postTimestamp(post), Page: page, Position: i + 1, Text: raw, RawText: raw, SourceURL: sourceURL})
+		original := msg.Clone()
+		var quotes []Quote
+		original.Find(".post-bbcode-quote, blockquote, .quote").Each(func(_ int, quote *goquery.Selection) {
+			if text := clean(quote.Text()); text != "" {
+				quotes = append(quotes, Quote{Text: text})
+			}
+		})
+		// Keep quoted material separate: it is not the author's opinion.
+		original.Find(".post-bbcode-quote, blockquote, .quote").Remove()
+		pageData.Posts = append(pageData.Posts, Post{ID: id, ThreadID: threadID, Author: author, Timestamp: postTimestamp(post), Page: page, Position: i + 1, Text: clean(original.Text()), RawText: raw, SourceURL: sourceURL, Quotes: quotes})
 	})
 	doc.Find("a[href]").Each(func(_ int, a *goquery.Selection) {
 		h, _ := a.Attr("href")

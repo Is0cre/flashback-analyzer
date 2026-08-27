@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/hex"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -297,6 +298,18 @@ func TestSlashConnectDispatchesToGandrSession(t *testing.T) {
 	// message to a channel that doesn't exist.
 	if msg.err == nil || !strings.Contains(msg.err.Error(), "gandrd") {
 		t.Fatalf("förväntade ett gandrd-anslutningsfel, fick: %v", msg.err)
+	}
+}
+
+func TestDefaultSeedYggdrasilKeyIsWellFormed(t *testing.T) {
+	if defaultSeedYggdrasilKey == "" {
+		t.Skip("no baked-in seed configured yet")
+	}
+	if len(defaultSeedYggdrasilKey) != 64 {
+		t.Fatalf("defaultSeedYggdrasilKey should be 64 hex chars, got %d: %q", len(defaultSeedYggdrasilKey), defaultSeedYggdrasilKey)
+	}
+	if _, err := hex.DecodeString(defaultSeedYggdrasilKey); err != nil {
+		t.Fatalf("defaultSeedYggdrasilKey is not valid hex: %v", err)
 	}
 }
 

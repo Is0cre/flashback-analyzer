@@ -263,7 +263,7 @@ const navigationSource = "flashback:navigation:v6-sitemap-parent-ancestors"
 // key (from its own startup log: "gandrd: yggdrasil node key: <hex>") is
 // pasted in here. Override for self-hosting or testing with
 // BACKFLASH_SEED_KEY; set it to "-" to disable auto-connect entirely.
-const defaultSeedYggdrasilKey = ""
+const defaultSeedYggdrasilKey = "66de53ae2ecbef6c404cd2ffec0fa261c0eae4c978727472017bffa0ef655a31"
 
 func New(s *store.Store, c *flashback.Client) App {
 	input := textinput.New()

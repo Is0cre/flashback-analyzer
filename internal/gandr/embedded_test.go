@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,5 +188,123 @@ func TestConnectEmbeddedFederatesAndExchangesAChatMessage(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("the seed peer never received the embedded client's message")
+	}
+}
+
+// TestPrivateGroupSharesAcrossTwoIndependentEmbeddedSessions is the real
+// proof for "share secret chats": two separate identities, two separate
+// local databases, federating only through a relay — the same topology
+// as two strangers both talking to the public seed. Alice creates a
+// group and sends a message; Bob, who has never touched this group or
+// this device before, joins using only the invite string (which
+// contains no key material — see gandrcrypto.DeriveGroupKey) and reads
+// Alice's message. The relay in between only ever handles an opaque
+// ciphertext blob under a random channel id.
+func TestPrivateGroupSharesAcrossTwoIndependentEmbeddedSessions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping full-stack test in -short mode")
+	}
+
+	hub := startRawDaemonPeer(t, []string{"tcp://127.0.0.1:0"})
+	hubKey := hex.EncodeToString(hub.transport.LocalAddr().YggKey)
+	hubAddr := "tcp://" + hub.transport.ListenAddrs()[0]
+
+	aliceSubsystem := NewAt(filepath.Join(t.TempDir(), "alice", "identity.key"))
+	if err := aliceSubsystem.Create("alices-losenord"); err != nil {
+		t.Fatal(err)
+	}
+	alice, err := aliceSubsystem.ConnectEmbedded(EmbeddedOptions{
+		SeedYggdrasilKey: hubKey,
+		BootstrapPeers:   []string{hubAddr},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer alice.Close()
+
+	bobSubsystem := NewAt(filepath.Join(t.TempDir(), "bob", "identity.key"))
+	if err := bobSubsystem.Create("bobs-helt-egna-losenord"); err != nil {
+		t.Fatal(err)
+	}
+	bob, err := bobSubsystem.ConnectEmbedded(EmbeddedOptions{
+		SeedYggdrasilKey: hubKey,
+		BootstrapPeers:   []string{hubAddr},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bob.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// wait for both to federate with the hub
+	for _, s := range []*Session{alice, bob} {
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			peers, err := s.Peers(ctx)
+			if err == nil && len(peers) == 1 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("a session never federated with the hub")
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	group, err := alice.CreatePrivateGroup("Hemligt möte", "gruppens-losenord")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invite, err := EncodeGroupInvite(group.ID, group.Name, "gruppens-losenord")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Bob has done nothing with this group before this exact call — no
+	// local row, no cached key, nothing — proving the invite alone is
+	// sufficient.
+	id, name, password, err := DecodeGroupInvite(invite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bob.UnlockPrivateGroup(id, password, name); err != nil {
+		t.Fatalf("bob kunde inte gå med i gruppen via inbjudan: %v", err)
+	}
+
+	if _, err := alice.SendPrivateGroup(ctx, group.ID, "mötet är imorgon 18:00"); err != nil {
+		t.Fatalf("alice kunde inte skicka gruppmeddelandet: %v", err)
+	}
+
+	select {
+	case env := <-bob.Incoming():
+		msg, ok := bob.DecryptGroupMessage(env)
+		if !ok {
+			t.Fatal("bob kunde inte dekryptera alices gruppmeddelande")
+		}
+		if msg.Content != "mötet är imorgon 18:00" {
+			t.Fatalf("fel innehåll: %q", msg.Content)
+		}
+		if msg.GroupID != group.ID {
+			t.Fatal("meddelandet dök upp under fel grupp-id")
+		}
+	case <-ctx.Done():
+		t.Fatal("bob mottog aldrig alices gruppmeddelande")
+	}
+
+	// The relay only ever saw an opaque blob under a random channel id —
+	// never plaintext, never the group name or password.
+	select {
+	case env := <-hub.sink.push:
+		payload := &proto.ChatPayload{}
+		if err := proto.DecodePayload(env.Payload, payload); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(payload.Content, "mötet") || strings.Contains(payload.Content, "18:00") {
+			t.Fatal("relayen såg klartext — gruppmeddelandet krypterades inte korrekt på tråden")
+		}
+	default:
+		t.Fatal("relayen fick aldrig pushen (bytt kanal-id mellan de två kontrollerna?)")
 	}
 }

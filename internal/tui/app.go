@@ -95,6 +95,10 @@ type gandrIncomingMsg struct {
 	message gandr.Message
 }
 
+type gandrGroupIncomingMsg struct {
+	message gandr.PrivateGroupMessage
+}
+
 type gandrChannelsMsg struct {
 	channels []gandr.Channel
 	err      error
@@ -503,6 +507,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		appendGandrMessage(a.GandrMessages, m.message)
 		if !m.message.Local {
+			playSound(soundIncomingMessage)
+		}
+		if a.GandrSession != nil {
+			return a, waitGandrIncoming(a.GandrSession)
+		}
+	case gandrGroupIncomingMsg:
+		if a.GandrSession != nil {
+			_ = a.GandrSession.SaveReceivedPrivateGroupMessage(m.message)
+		}
+		if a.GandrGroupMessages == nil {
+			a.GandrGroupMessages = make(map[[32]byte][]gandr.PrivateGroupMessage)
+		}
+		a.GandrGroupMessages[m.message.GroupID] = append(a.GandrGroupMessages[m.message.GroupID], m.message)
+		if a.GandrSession == nil || m.message.Sender != a.GandrSession.PublicKey() {
 			playSound(soundIncomingMessage)
 		}
 		if a.GandrSession != nil {
@@ -1701,7 +1719,11 @@ func renderGandrChat(a App) string {
 				start = len(messages) - 18
 			}
 			for _, message := range messages[start:] {
-				isSelf := message.Sender == ([32]byte{})
+				// Private group messages always carry a real sender
+				// pubkey, even your own — unlike public channel messages
+				// there's no all-zero "this is you" sentinel, so this has
+				// to compare against the session's actual identity.
+				isSelf := a.GandrSession != nil && message.Sender == a.GandrSession.PublicKey()
 				sender := fmt.Sprintf("~%x", message.Sender[:4])
 				if isSelf {
 					sender = "du"
@@ -2636,6 +2658,12 @@ func unlockGandr(subsystem *gandr.Subsystem, passphrase string) tea.Cmd {
 	}
 }
 
+// gandrChatHistoryRetention caps how much local channel history sticks
+// around. There's no network backfill (see internal/gandr.Session's
+// PruneOldMessages doc) — a client only ever has history for what it was
+// online for — so this purely bounds local storage growth over time.
+const gandrChatHistoryRetention = 3 * 24 * time.Hour
+
 func connectGandr(subsystem *gandr.Subsystem, seedKey string, bootstrapPeers []string) tea.Cmd {
 	return func() tea.Msg {
 		if subsystem == nil {
@@ -2671,6 +2699,10 @@ func connectGandr(subsystem *gandr.Subsystem, seedKey string, bootstrapPeers []s
 			_ = session.Close()
 			return gandrSessionMsg{err: err}
 		}
+		// Best-effort: there's no network backfill, so local retention is
+		// the only thing bounding how much channel history accumulates
+		// over time. A failed prune shouldn't block connecting.
+		_ = session.PruneOldMessages(gandrChatHistoryRetention)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		channels, err = session.EnsureDefaultChannels(ctx)
@@ -2729,6 +2761,16 @@ func waitGandrIncoming(session *gandr.Session) tea.Cmd {
 			env, ok := <-incoming
 			if !ok || env == nil {
 				return gandrSessionMsg{err: fmt.Errorf("E2E-CHATT-daemon kopplades från")}
+			}
+			// Private group messages travel over the exact same
+			// proto.MsgChat broadcast a public channel uses (see
+			// Session.SendPrivateGroup) — the only way to tell them apart
+			// is whether this session happens to hold the key for that
+			// channel id. Try that first; anything it can't decrypt (every
+			// public message, plus any group this session doesn't belong
+			// to) falls through to ordinary chat decoding unchanged.
+			if group, ok := session.DecryptGroupMessage(env); ok {
+				return gandrGroupIncomingMsg{message: group}
 			}
 			message, err := gandr.DecodeChat(env)
 			if err == nil {
@@ -2853,7 +2895,10 @@ func acceptGandrInvitation(session *gandr.Session, value string) tea.Cmd {
 // spaces.
 func unlockAndOpenGandrGroup(session *gandr.Session, id [32]byte, password string) tea.Cmd {
 	return func() tea.Msg {
-		if err := session.UnlockPrivateGroup(id, password); err != nil {
+		// Already a known local group (this flow only ever runs from
+		// clicking one already listed in the sidebar) — no new name to
+		// give it.
+		if err := session.UnlockPrivateGroup(id, password, ""); err != nil {
 			return gandrGroupMsg{err: err}
 		}
 		messages, err := session.PrivateGroupMessages(id, 200)
@@ -2900,17 +2945,21 @@ func gandrGroupCommand(session *gandr.Session, active *[32]byte, command string)
 			return gandrGroupMsg{groups: groups, active: &group.ID}
 		case "öppna":
 			var id [32]byte
-			var password string
+			var password, name string
 			switch {
 			case len(parts) == 3 && gandr.IsGroupInvite(parts[2]):
 				// /grupp öppna <inbjudan> — the invite string already
-				// carries both the ID and the password, so there is
-				// nothing left to type or look up by hand.
-				decodedID, _, decodedPassword, err := gandr.DecodeGroupInvite(parts[2])
+				// carries the ID, name and password, so there is nothing
+				// left to type or look up by hand. This is what actually
+				// lets a second person join at all: the key is derived
+				// from (id, password) alone (see DeriveGroupKey), so
+				// having both here is sufficient with no prior local
+				// state on this device.
+				decodedID, decodedName, decodedPassword, err := gandr.DecodeGroupInvite(parts[2])
 				if err != nil {
 					return gandrGroupMsg{err: fmt.Errorf("ogiltig inbjudan: %w", err)}
 				}
-				id, password = decodedID, decodedPassword
+				id, name, password = decodedID, decodedName, decodedPassword
 			case len(parts) == 4:
 				decoded, err := hex.DecodeString(parts[2])
 				if err != nil || len(decoded) != 32 {
@@ -2921,7 +2970,7 @@ func gandrGroupCommand(session *gandr.Session, active *[32]byte, command string)
 			default:
 				return gandrGroupMsg{err: fmt.Errorf("använd: /grupp öppna ID LÖSENORD eller /grupp öppna INBJUDAN")}
 			}
-			if err := session.UnlockPrivateGroup(id, password); err != nil {
+			if err := session.UnlockPrivateGroup(id, password, name); err != nil {
 				return gandrGroupMsg{err: err}
 			}
 			messages, err := session.PrivateGroupMessages(id, 200)
@@ -2930,17 +2979,21 @@ func gandrGroupCommand(session *gandr.Session, active *[32]byte, command string)
 		case "bjud":
 			// /grupp bjud LÖSENORD — packages the *currently open* group's
 			// ID, name and the given password into one shareable string.
-			// The password is never stored after creation/unlock (only a
-			// password-derived key is), so it has to be re-typed here; this
-			// still spares the recipient from copying a 64-character ID.
+			// The password is never stored (only used to re-derive the
+			// group key on demand, see DeriveGroupKey), so it has to be
+			// re-typed here; this still spares the recipient from copying
+			// a 64-character ID by hand.
 			if active == nil {
 				return gandrGroupMsg{err: fmt.Errorf("öppna gruppen du vill bjuda in till först")}
 			}
 			if len(parts) != 3 {
 				return gandrGroupMsg{err: fmt.Errorf("använd: /grupp bjud LÖSENORD")}
 			}
-			if err := session.UnlockPrivateGroup(*active, parts[2]); err != nil {
-				return gandrGroupMsg{err: fmt.Errorf("fel lösenord, ingen inbjudan skapades: %w", err)}
+			// Verify without touching the cached key — re-running Unlock
+			// here would silently overwrite an already-correct key with a
+			// typo'd one.
+			if !session.VerifyGroupPassword(*active, parts[2]) {
+				return gandrGroupMsg{err: fmt.Errorf("fel lösenord, ingen inbjudan skapades")}
 			}
 			groups, err := session.PrivateGroups()
 			if err != nil {
@@ -2969,7 +3022,9 @@ func gandrGroupCommand(session *gandr.Session, active *[32]byte, command string)
 
 func sendPrivateGandrGroup(session *gandr.Session, id [32]byte, content string) tea.Cmd {
 	return func() tea.Msg {
-		if _, err := session.SendPrivateGroup(id, content); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := session.SendPrivateGroup(ctx, id, content); err != nil {
 			return gandrGroupMsg{err: err}
 		}
 		messages, err := session.PrivateGroupMessages(id, 200)

@@ -22,10 +22,16 @@ const (
 	MaxMessageSize = HeaderSize + MaxPayloadSize + crypto.SignatureSize
 )
 
-// Timestamp acceptance window. Non-negotiable, not configurable.
+// Timestamp acceptance window. Non-negotiable, not configurable. This is
+// an anti-replay bound on *live* traffic — how stale a message can be
+// before it's rejected as suspicious — not a history/retention window
+// (that's Options.MaxMessageAge, applied to local storage). 5 minutes
+// gives real multi-hop federation delay, retry backoff, and modest
+// clock drift room to land without opening this up into anything close
+// to a replay window.
 const (
 	// MaxMessageAge is how far in the past a live message may be stamped.
-	MaxMessageAge = 120 * time.Second
+	MaxMessageAge = 5 * time.Minute
 	// MaxClockSkew is how far in the future a message may be stamped.
 	MaxClockSkew = 10 * time.Second
 )

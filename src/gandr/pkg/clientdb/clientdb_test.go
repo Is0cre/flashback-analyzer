@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gandr-net/gandr/pkg/crypto"
 )
@@ -106,6 +107,40 @@ func TestChatMessagesPersistAndDeduplicate(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Content != want.Content || !got[0].Local {
 		t.Fatalf("felaktig sparad chatt: %#v", got)
+	}
+}
+
+func TestPruneChatMessagesRemovesOnlyOldMessages(t *testing.T) {
+	db, _ := testDB(t)
+	var channel [32]byte
+	channel[0] = 9
+	now := time.Now()
+
+	old := ChatMessage{ChannelID: channel, Content: "gammalt", At: now.Add(-4 * 24 * time.Hour).UnixNano()}
+	old.Hash[0] = 1
+	recent := ChatMessage{ChannelID: channel, Content: "nytt", At: now.Add(-1 * time.Hour).UnixNano()}
+	recent.Hash[0] = 2
+	if err := db.SaveChatMessage(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveChatMessage(recent); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := db.PruneChatMessages(3*24*time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("tog bort %d meddelanden, väntade 1", removed)
+	}
+
+	got, err := db.ListChatMessages(channel, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Content != "nytt" {
+		t.Fatalf("fel meddelande kvar efter pruning: %#v", got)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -312,6 +313,19 @@ func (s *Session) Messages(channelID [32]byte, limit int) ([]ChatMessage, error)
 	return out, nil
 }
 
+// PruneOldMessages bounds local channel-history retention to maxAge. A
+// client only ever has history for whatever it happened to be online
+// for — there's no network-side backfill — so this is the only thing
+// actually controlling how much accumulates locally over time. Private
+// group messages are untouched: lower volume, more deliberately kept.
+func (s *Session) PruneOldMessages(maxAge time.Duration) error {
+	if s == nil || s.db == nil {
+		return errors.New("E2E-CHATT-sessionen är inte aktiv")
+	}
+	_, err := s.db.PruneChatMessages(maxAge, time.Now())
+	return err
+}
+
 func (s *Session) CreatePrivateGroup(name, password string) (PrivateGroup, error) {
 	if s == nil || s.db == nil {
 		return PrivateGroup{}, errors.New("E2E-CHATT-sessionen är inte aktiv")
@@ -323,26 +337,40 @@ func (s *Session) CreatePrivateGroup(name, password string) (PrivateGroup, error
 	if _, err := rand.Read(id[:]); err != nil {
 		return PrivateGroup{}, err
 	}
-	key, err := gandrcrypto.NewGroupKey()
-	if err != nil {
-		return PrivateGroup{}, err
-	}
-	salt, err := gandrcrypto.NewGroupSalt()
-	if err != nil {
-		return PrivateGroup{}, err
-	}
-	wrapped, err := gandrcrypto.WrapGroupKey([]byte(password), salt, id, key)
+	// The key is derived from (id, password), not stored — see
+	// gandrcrypto.DeriveGroupKey. Nothing here is secret to protect at
+	// rest beyond the password itself, which is never persisted.
+	key, err := gandrcrypto.DeriveGroupKey([]byte(password), id)
 	if err != nil {
 		return PrivateGroup{}, err
 	}
 	created := time.Now().UnixNano()
 	if err := s.db.SavePrivateGroup(gandrclientdb.PrivateGroup{
-		ID: id, Name: strings.TrimSpace(name), Salt: salt[:], WrappedKey: wrapped, CreatedAt: created,
+		ID: id, Name: strings.TrimSpace(name), CreatedAt: created,
 	}); err != nil {
 		return PrivateGroup{}, err
 	}
 	s.groups[id] = key
+	s.subscribeGroup(id)
 	return PrivateGroup{ID: id, Name: strings.TrimSpace(name), CreatedAt: created}, nil
+}
+
+// subscribeGroup tells the transport this session wants broadcasts for
+// id. Private groups ride the exact same proto.MsgChat channel-broadcast
+// mechanism a public channel uses (see SendPrivateGroup), and the
+// transport's own delivery filter (embeddedClient.wants /
+// serverConn.wants) only lets through channel ids the session has
+// explicitly subscribed to — without this, group messages would arrive
+// over the wire and then get silently dropped before DecryptGroupMessage
+// ever saw them. Best-effort: an offline session has no client to
+// subscribe on, and that's fine, everything still works locally.
+func (s *Session) subscribeGroup(id [32]byte) {
+	if s.client == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = s.client.Subscribe(ctx, id)
 }
 
 func (s *Session) PrivateGroups() ([]PrivateGroup, error) {
@@ -360,31 +388,47 @@ func (s *Session) PrivateGroups() ([]PrivateGroup, error) {
 	return out, nil
 }
 
-func (s *Session) UnlockPrivateGroup(id [32]byte, password string) error {
+// UnlockPrivateGroup makes id's group readable/writable in this session.
+// The key is deterministically re-derived from (id, password) every
+// time (see gandrcrypto.DeriveGroupKey) rather than looked up from local
+// state, so this works identically for a group you created yourself and
+// one you're joining for the first time via someone else's invite — see
+// internal/gandr.EncodeGroupInvite, which carries exactly (id, name,
+// password) and nothing else.
+//
+// A wrong password isn't rejected here — deriving a key never fails,
+// there's nothing stored locally to fail to decrypt against. It surfaces
+// instead the first time existing group history is decrypted (see
+// PrivateGroupMessages) or a message fails to send meaningfully; a
+// brand-new empty group has no way to verify a password at all. name is
+// only used the first time this id is seen locally, to bookmark it for
+// /grupp lista — an already-known group keeps whatever name it was
+// first saved under.
+func (s *Session) UnlockPrivateGroup(id [32]byte, password, name string) error {
 	if s == nil || s.db == nil {
 		return errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
+	key, err := gandrcrypto.DeriveGroupKey([]byte(password), id)
+	if err != nil {
+		return err
+	}
+	s.groups[id] = key
+	s.subscribeGroup(id)
 	items, err := s.db.ListPrivateGroups()
 	if err != nil {
 		return err
 	}
 	for _, item := range items {
-		if item.ID != id {
-			continue
+		if item.ID == id {
+			return nil // already bookmarked locally; key is now cached
 		}
-		if len(item.Salt) != gandrcrypto.GroupSaltSize {
-			return errors.New("ogiltig gruppsalt")
-		}
-		var salt [gandrcrypto.GroupSaltSize]byte
-		copy(salt[:], item.Salt)
-		key, err := gandrcrypto.UnwrapGroupKey([]byte(password), salt, id, item.WrappedKey)
-		if err != nil {
-			return errors.New("fel grupp-lösenord")
-		}
-		s.groups[id] = key
-		return nil
 	}
-	return errors.New("gruppen finns inte lokalt")
+	if strings.TrimSpace(name) == "" {
+		name = fmt.Sprintf("~%x", id[:4])
+	}
+	return s.db.SavePrivateGroup(gandrclientdb.PrivateGroup{
+		ID: id, Name: strings.TrimSpace(name), CreatedAt: time.Now().UnixNano(),
+	})
 }
 
 // IsGroupUnlocked reports whether id's key is already cached in this
@@ -398,7 +442,45 @@ func (s *Session) IsGroupUnlocked(id [32]byte) bool {
 	return ok
 }
 
-func (s *Session) SendPrivateGroup(id [32]byte, content string) (PrivateGroupMessage, error) {
+// VerifyGroupPassword reports whether password re-derives the same key
+// already cached for id, without touching that cache either way. Use
+// this instead of re-running UnlockPrivateGroup on an already-open
+// group (e.g. re-confirming a password before generating an invite) —
+// UnlockPrivateGroup unconditionally overwrites the cached key with
+// whatever it derives, so a typo there would silently swap in a wrong
+// key for a group that was already correctly unlocked.
+func (s *Session) VerifyGroupPassword(id [32]byte, password string) bool {
+	if s == nil {
+		return false
+	}
+	cached, ok := s.groups[id]
+	if !ok {
+		return false
+	}
+	got, err := gandrcrypto.DeriveGroupKey([]byte(password), id)
+	return err == nil && got == cached
+}
+
+// SendPrivateGroup encrypts content with the group's shared symmetric key
+// and broadcasts it under ChannelID = the group's own random id, the same
+// proto.MsgChat mechanism a public channel uses — the only difference is
+// the Content field holds base64-encoded ciphertext instead of plain
+// text. Nothing about the wire format changes: a relaying node still
+// only ever sees a channel broadcast and the sender's pubkey (unavoidable
+// for signature verification, true of every message type), never
+// readable content — the group id itself is random, not derived from a
+// guessable name the way public channels' ids are.
+//
+// Previously this only ever wrote to the local encrypted DB and never
+// actually reached the network — a private group looked like shared
+// chat but was really a local notebook. ctx bounds the network attempt;
+// like SendChannel, a failed send returns the error before anything is
+// saved locally, and an offline session (no client) skips straight to
+// local save.
+func (s *Session) SendPrivateGroup(ctx context.Context, id [32]byte, content string) (PrivateGroupMessage, error) {
+	if s == nil || s.id == nil {
+		return PrivateGroupMessage{}, errors.New("E2E-CHATT-sessionen är inte aktiv")
+	}
 	key, ok := s.groups[id]
 	if !ok {
 		return PrivateGroupMessage{}, errors.New("gruppen är låst")
@@ -406,6 +488,19 @@ func (s *Session) SendPrivateGroup(id [32]byte, content string) (PrivateGroupMes
 	blob, err := gandrcrypto.EncryptGroup(key, id, []byte(content))
 	if err != nil {
 		return PrivateGroupMessage{}, err
+	}
+	if s.client != nil {
+		payload, err := proto.EncodePayload(&proto.ChatPayload{ChannelID: id, Content: base64.StdEncoding.EncodeToString(blob)})
+		if err != nil {
+			return PrivateGroupMessage{}, err
+		}
+		env, err := proto.NewEnvelope(s.id.PrivateKey, proto.MsgChat, id, payload)
+		if err != nil {
+			return PrivateGroupMessage{}, err
+		}
+		if err := s.client.Send(ctx, env); err != nil {
+			return PrivateGroupMessage{}, err
+		}
 	}
 	hash := gandrcrypto.Digest(id[:], blob)
 	var sender [32]byte
@@ -415,6 +510,72 @@ func (s *Session) SendPrivateGroup(id [32]byte, content string) (PrivateGroupMes
 		return PrivateGroupMessage{}, err
 	}
 	return PrivateGroupMessage{Hash: hash, GroupID: id, Sender: sender, Content: content, At: message.MessageAt}, nil
+}
+
+// DecryptGroupMessage attempts to decode env as a message in one of this
+// session's currently unlocked private groups. ok is false whenever env
+// isn't a group message this session can read — including all ordinary
+// public-channel traffic, and group messages for groups that are locked
+// or unknown here — in which case the caller should fall through to
+// normal public-channel decoding (see DecodeChat).
+func (s *Session) DecryptGroupMessage(env *proto.Envelope) (msg PrivateGroupMessage, ok bool) {
+	if s == nil || env == nil || env.Type != proto.MsgChat {
+		return PrivateGroupMessage{}, false
+	}
+	payload := &proto.ChatPayload{}
+	if err := proto.DecodePayload(env.Payload, payload); err != nil {
+		return PrivateGroupMessage{}, false
+	}
+	key, known := s.groups[payload.ChannelID]
+	if !known {
+		return PrivateGroupMessage{}, false
+	}
+	raw, err := base64.StdEncoding.DecodeString(payload.Content)
+	if err != nil {
+		return PrivateGroupMessage{}, false
+	}
+	plain, err := gandrcrypto.DecryptGroup(key, payload.ChannelID, raw)
+	if err != nil {
+		return PrivateGroupMessage{}, false
+	}
+	return PrivateGroupMessage{
+		Hash: env.ContentID(), GroupID: payload.ChannelID, Sender: env.Sender,
+		Content: string(plain), At: env.Timestamp,
+	}, true
+}
+
+// SaveReceivedPrivateGroupMessage persists an already-decrypted incoming
+// group message (see DecryptGroupMessage) to the local encrypted DB, the
+// same store SendPrivateGroup writes its own outgoing messages to —
+// duplicates (by content hash) are silently ignored.
+func (s *Session) SaveReceivedPrivateGroupMessage(m PrivateGroupMessage) error {
+	if s == nil || s.db == nil {
+		return errors.New("E2E-CHATT-sessionen är inte aktiv")
+	}
+	key, ok := s.groups[m.GroupID]
+	if !ok {
+		return errors.New("gruppen är låst")
+	}
+	blob, err := gandrcrypto.EncryptGroup(key, m.GroupID, []byte(m.Content))
+	if err != nil {
+		return err
+	}
+	return s.db.SavePrivateGroupMessage(gandrclientdb.PrivateGroupMessage{
+		Hash: m.Hash, GroupID: m.GroupID, Sender: m.Sender, Ciphertext: blob, MessageAt: m.At,
+	})
+}
+
+// PublicKey returns this session's own Gandr identity public key, e.g.
+// to tell "my own message" apart from someone else's when both carry a
+// real sender pubkey (private group messages, unlike public channel
+// messages, never use an all-zero sentinel for "you").
+func (s *Session) PublicKey() [32]byte {
+	if s == nil || s.id == nil {
+		return [32]byte{}
+	}
+	var pub [32]byte
+	copy(pub[:], s.id.PublicKey)
+	return pub
 }
 
 func (s *Session) PrivateGroupMessages(id [32]byte, limit int) ([]PrivateGroupMessage, error) {

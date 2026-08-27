@@ -1,79 +1,36 @@
 package crypto
 
 import (
-	"crypto/rand"
 	"errors"
-	"fmt"
 
 	"golang.org/x/crypto/argon2"
 )
 
 const (
-	GroupSaltSize    = 16
 	groupArgonTime   = 3
 	groupArgonMemory = 64 * 1024
 	groupArgonLanes  = 4
 )
 
-// NewGroupKey creates an independent symmetric key. It is never derived from
-// a GANDR identity or a BACKFLASH mesh identity.
-func NewGroupKey() ([KeySize]byte, error) {
-	var key [KeySize]byte
-	if _, err := rand.Read(key[:]); err != nil {
-		return key, fmt.Errorf("crypto: generating group key: %w", err)
-	}
-	return key, nil
-}
-
-// NewGroupSalt creates the public salt used for password-based group key
-// wrapping. The salt is not secret.
-func NewGroupSalt() ([GroupSaltSize]byte, error) {
-	var salt [GroupSaltSize]byte
-	if _, err := rand.Read(salt[:]); err != nil {
-		return salt, fmt.Errorf("crypto: generating group salt: %w", err)
-	}
-	return salt, nil
-}
-
-func deriveGroupPasswordKey(password, salt []byte) [KeySize]byte {
-	return [KeySize]byte(argon2.IDKey(password, salt, groupArgonTime, groupArgonMemory, groupArgonLanes, KeySize))
-}
-
-// WrapGroupKey protects a random group key with a password. The returned value
-// contains nonce || ciphertext and is safe to store as an opaque blob.
-func WrapGroupKey(password []byte, salt [GroupSaltSize]byte, groupID [32]byte, groupKey [KeySize]byte) ([]byte, error) {
+// DeriveGroupKey computes a private group's message-encryption key
+// directly from its password via Argon2id, using the group's own random
+// id as the salt (already unique per group, already known to anyone who
+// has the invite — a separate stored salt would add nothing). This is
+// deliberately deterministic: the same (groupID, password) pair always
+// derives the same key, on any device, with no prior local state and no
+// separate key material to transmit or store. That's what makes an
+// invite carrying just the id, name, and password (see
+// internal/gandr.EncodeGroupInvite) enough on its own to actually join a
+// group — an earlier design generated an independent random key and
+// merely wrapped it with the password for local at-rest protection,
+// which meant a password by itself was never sufficient to reach the
+// same key as anyone else, and there was no way to grant a new member
+// access without also transmitting that random key out of band.
+func DeriveGroupKey(password []byte, groupID [32]byte) ([KeySize]byte, error) {
 	if len(password) == 0 {
-		return nil, errors.New("crypto: group password is empty")
+		return [KeySize]byte{}, errors.New("crypto: group password is empty")
 	}
-	kek := deriveGroupPasswordKey(password, salt[:])
-	nonce, ciphertext, err := Encrypt(kek, groupKey[:], groupID[:])
-	if err != nil {
-		return nil, err
-	}
-	return append(nonce[:], ciphertext...), nil
-}
-
-// UnwrapGroupKey reverses WrapGroupKey and rejects a wrong password.
-func UnwrapGroupKey(password []byte, salt [GroupSaltSize]byte, groupID [32]byte, wrapped []byte) ([KeySize]byte, error) {
-	var groupKey [KeySize]byte
-	if len(password) == 0 {
-		return groupKey, errors.New("crypto: group password is empty")
-	}
-	if len(wrapped) < NonceSize+Overhead {
-		return groupKey, errors.New("crypto: wrapped group key is too short")
-	}
-	var nonce [NonceSize]byte
-	copy(nonce[:], wrapped[:NonceSize])
-	kek := deriveGroupPasswordKey(password, salt[:])
-	plain, err := Decrypt(kek, nonce, wrapped[NonceSize:], groupID[:])
-	if err != nil {
-		return groupKey, err
-	}
-	if len(plain) != KeySize {
-		return groupKey, errors.New("crypto: invalid group key")
-	}
-	copy(groupKey[:], plain)
-	return groupKey, nil
+	return [KeySize]byte(argon2.IDKey(password, groupID[:], groupArgonTime, groupArgonMemory, groupArgonLanes, KeySize)), nil
 }
 
 // EncryptGroup encrypts one group message. The returned blob is nonce ||

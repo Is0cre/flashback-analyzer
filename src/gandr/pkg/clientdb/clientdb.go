@@ -85,11 +85,9 @@ type ChatMessage struct {
 // PrivateGroup contains only local group metadata. The wrapped key is an
 // opaque password-protected blob and the group name is encrypted at rest.
 type PrivateGroup struct {
-	ID         [32]byte
-	Name       string
-	Salt       []byte
-	WrappedKey []byte
-	CreatedAt  int64
+	ID        [32]byte
+	Name      string
+	CreatedAt int64
 }
 
 type PrivateGroupMessage struct {
@@ -149,8 +147,6 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 CREATE TABLE IF NOT EXISTS private_groups (
     group_id    BLOB PRIMARY KEY,
     name        BLOB NOT NULL,
-    salt        BLOB NOT NULL,
-    wrapped_key BLOB NOT NULL,
     created_at  INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS private_group_messages (
@@ -354,6 +350,23 @@ func (d *DB) ListChatMessages(channelID [32]byte, limit int) ([]ChatMessage, err
 	return newest, nil
 }
 
+// PruneChatMessages deletes channel messages older than maxAge, by
+// message_at. This bounds local retention independently of the network's
+// own live-message freshness window (proto.MaxMessageAge, a much
+// shorter anti-replay bound, not a history policy) — a client only ever
+// sees what it was online for anyway, so local retention is the only
+// thing actually controlling how much channel history sticks around.
+// Returns the number of rows removed.
+func (d *DB) PruneChatMessages(maxAge time.Duration, now time.Time) (int, error) {
+	cutoff := now.Add(-maxAge).UnixNano()
+	res, err := d.db.Exec(`DELETE FROM chat_messages WHERE message_at < ?`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("clientdb: pruning chat messages: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 func boolInt(value bool) int {
 	if value {
 		return 1
@@ -367,15 +380,14 @@ func (d *DB) SavePrivateGroup(group PrivateGroup) error {
 		return err
 	}
 	_, err = d.db.Exec(`INSERT INTO private_groups
-		(group_id, name, salt, wrapped_key, created_at) VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(group_id) DO UPDATE SET name=excluded.name,
-		salt=excluded.salt, wrapped_key=excluded.wrapped_key`,
-		group.ID[:], name, group.Salt, group.WrappedKey, group.CreatedAt)
+		(group_id, name, created_at) VALUES (?, ?, ?)
+		ON CONFLICT(group_id) DO UPDATE SET name=excluded.name`,
+		group.ID[:], name, group.CreatedAt)
 	return err
 }
 
 func (d *DB) ListPrivateGroups() ([]PrivateGroup, error) {
-	rows, err := d.db.Query(`SELECT group_id, name, salt, wrapped_key, created_at
+	rows, err := d.db.Query(`SELECT group_id, name, created_at
 		FROM private_groups ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -383,9 +395,9 @@ func (d *DB) ListPrivateGroups() ([]PrivateGroup, error) {
 	defer rows.Close()
 	var out []PrivateGroup
 	for rows.Next() {
-		var id, name, salt, wrapped []byte
+		var id, name []byte
 		var created int64
-		if err := rows.Scan(&id, &name, &salt, &wrapped, &created); err != nil {
+		if err := rows.Scan(&id, &name, &created); err != nil {
 			return nil, err
 		}
 		opened, err := d.open("private_groups", id, name)
@@ -395,8 +407,6 @@ func (d *DB) ListPrivateGroups() ([]PrivateGroup, error) {
 		var group PrivateGroup
 		copy(group.ID[:], id)
 		group.Name = string(opened)
-		group.Salt = append([]byte(nil), salt...)
-		group.WrappedKey = append([]byte(nil), wrapped...)
 		group.CreatedAt = created
 		out = append(out, group)
 	}

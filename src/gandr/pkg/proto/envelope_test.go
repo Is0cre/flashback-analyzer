@@ -223,8 +223,8 @@ func TestValidateTimestamp(t *testing.T) {
 	}{
 		{"current", now, nil},
 		{"1s old", now.Add(-time.Second), nil},
-		{"119s old", now.Add(-119 * time.Second), nil},
-		{"121s old", now.Add(-121 * time.Second), ErrTimestampOld},
+		{"299s old", now.Add(-299 * time.Second), nil},
+		{"301s old", now.Add(-301 * time.Second), ErrTimestampOld},
 		{"way old", now.Add(-24 * time.Hour), ErrTimestampOld},
 		{"9s future", now.Add(9 * time.Second), nil},
 		{"11s future", now.Add(11 * time.Second), ErrTimestampFuture},

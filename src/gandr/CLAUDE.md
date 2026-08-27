@@ -62,7 +62,10 @@ Visual TUI inspection: `GANDR_DUMP_VIEW=/tmp/f.txt go test ./pkg/tui/ -run TestD
    profile owner for guestbook entries), hourly prune. Keyfiles MUST
    live under /var/lib/gandrd (systemd ProtectSystem=strict makes /etc
    read-only).
-9. `pkg/clientdb` — client SQLite (mattn/go-sqlite3), application-layer
+9. `pkg/clientdb` — client SQLite (modernc.org/sqlite, pure Go — not
+   mattn/go-sqlite3: CGO_ENABLED=0 embedders get a hard runtime failure
+   from mattn's driver, not a build error, so it stays invisible until
+   someone actually runs the binary), application-layer
    encryption: every sensitive value XChaCha20-Poly1305 under
    HKDF(identity seed, "gandr-clientdb-v1") with table+rowkey AAD.
    Nicknames/blocklist NEVER leave this DB.
@@ -90,8 +93,10 @@ Visual TUI inspection: `GANDR_DUMP_VIEW=/tmp/f.txt go test ./pkg/tui/ -run TestD
 - Stdlib preferred. Approved deps ONLY: yggdrasil-go, x/crypto,
   filippo.io/edwards25519 (stdlib's own vendored code, needed for
   Ed25519→X25519), msgpack, bubbletea+lipgloss (NOT bubbles —
-  deliberately avoided), mattn/go-sqlite3 (client only), BurntSushi/toml.
-  Justify any addition in README's dependency table.
+  deliberately avoided), modernc.org/sqlite (client only — pure Go,
+  not mattn/go-sqlite3; this project cross-compiles CGO-free release
+  binaries), BurntSushi/toml. Justify any addition in README's
+  dependency table.
 - Invalid signature/timestamp/frame = drop SILENTLY. No error reply, no
   log. Non-negotiable.
 - No logging of message content, peer identities, or who-talked-to-whom.

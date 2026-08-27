@@ -96,12 +96,17 @@ Every dependency is a liability; this is the complete list and why:
 | `filippo.io/edwards25519` | Ed25519→X25519 conversion for sealed messages; same code vendored in Go's stdlib, which does not export it |
 | `vmihailenco/msgpack` | payload serialization (mandated) |
 | `charmbracelet/bubbletea`, `lipgloss` | client TUI (mandated) |
-| `mattn/go-sqlite3` | client-local storage (mandated; client only) |
+| `modernc.org/sqlite` | client-local storage (mandated; client only) |
 | `BurntSushi/toml` | config format mandated as TOML; stdlib has no TOML |
 
 Client data is encrypted at the application layer (XChaCha20-Poly1305
 keyed from the identity key, row-bound AAD) rather than SQLCipher,
-which would require a CGO fork outside this list.
+which would require a CGO fork outside this list — for the same
+reason, the SQLite driver itself is modernc.org/sqlite (pure Go), not
+mattn/go-sqlite3: the latter also needs CGO, which produces a hard
+runtime failure rather than a build error for anyone embedding this
+against a CGO_ENABLED=0 binary, so the problem stays invisible until
+someone actually runs it.
 
 ## Final note
 

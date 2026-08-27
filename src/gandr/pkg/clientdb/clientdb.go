@@ -9,7 +9,13 @@
 // as associated data so a ciphertext cannot be transplanted between
 // rows. Lookup keys (pubkeys, hashes) stay plaintext — they are public
 // material on the network anyway. SQLCipher was rejected: it requires a
-// CGO fork outside the approved dependency set.
+// CGO fork outside the approved dependency set — and for the same
+// reason, this package uses modernc.org/sqlite (pure Go), not
+// mattn/go-sqlite3: any embedder building with CGO_ENABLED=0 (BACKFLASH
+// ships all its release binaries that way) gets a hard runtime failure
+// from mattn's driver the instant it tries to open a database, not a
+// build error, so the CGO dependency stayed invisible until someone
+// actually ran the binary.
 //
 // Nicknames and the blocklist NEVER leave this database. They are not
 // part of any protocol message and no code path serializes them for the
@@ -27,8 +33,8 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/crypto/hkdf"
+	_ "modernc.org/sqlite"
 
 	"github.com/gandr-net/gandr/pkg/crypto"
 )
@@ -173,10 +179,15 @@ func Open(path string, identityKey ed25519.PrivateKey) (*DB, error) {
 	if _, err := io.ReadFull(r, key[:]); err != nil {
 		return nil, fmt.Errorf("clientdb: deriving storage key: %w", err)
 	}
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("clientdb: opening database: %w", err)
 	}
+	// A single connection sidesteps needing WAL/busy-timeout tuning for
+	// concurrent access entirely — this is one process's local store, not
+	// a server handling concurrent clients (mirrors internal/store's own
+	// SQLite usage in the main BACKFLASH module).
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("clientdb: initializing schema: %w", err)

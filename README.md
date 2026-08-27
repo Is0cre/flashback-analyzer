@@ -152,6 +152,11 @@ Yggdrasil-nyckel ens är. Nyckeln bakas in i klienten
 `BACKFLASH_SEED_KEY=<64 hex>` för att peka på en egen seed i stället, eller
 `BACKFLASH_SEED_KEY=-` för att stänga av auto-anslutningen helt.
 
+`gandrd` (seed-daemonen) byggs numera av samma release-pipeline som
+`backflash`/`backflash-cache` — inget behöver byggas på servern. Se
+[docs/gandrd-seed-debian.md](docs/gandrd-seed-debian.md) för
+enradsinstallation från en GitHub Release.
+
 ## Cache-mesh
 
 En frivillig, publik cache av redan hämtat Flashback-innehåll, delad mellan

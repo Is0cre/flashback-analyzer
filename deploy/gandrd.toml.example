@@ -1,0 +1,48 @@
+# gandrd config for BACKFLASH's public seed node.
+# copy to /etc/gandrd/config.toml and edit — install-gandrd-release-debian.sh
+# does this automatically, rewriting keyfile/passphrase_file paths for the
+# hardened systemd unit's ProtectSystem=strict (/etc is read-only for the
+# service; state lives under /var/lib/gandrd instead).
+
+[identity]
+keyfile = "/etc/gandrd/identity.key"
+# passphrase_file = "/etc/gandrd/passphrase"   # one line; chmod 600
+display_name = ""
+
+[network]
+# Yggdrasil link-layer listeners other yggdrasil nodes can peer with
+listen = ["tcp://0.0.0.0:4242"]
+# Yggdrasil link-layer peers (public peers or direct arrangements);
+# required to reach the overlay unless peers connect inbound
+peers = []
+# ygg_keyfile = "/var/lib/gandrd/yggdrasil.key"
+
+[peering]
+# This is meant to be BACKFLASH's well-known first-contact seed (see the
+# Peering section in README.md), so it's on by default here — flip to
+# false if you're standing this up as an ordinary relay instead.
+seed_node       = true
+max_peers       = 200
+trust_new_peers = "neutral"   # untrusted|neutral|trusted|vouched
+# Gandr seed nodes: hex-encoded yggdrasil node keys to federate with
+seeds = []
+
+[capabilities]
+chat    = true
+feed    = true
+forum   = true
+storage = false   # true on dedicated storage nodes
+relay   = true
+seed    = true    # true on bootstrap nodes — see [peering] seed_node above
+
+[limits]
+max_payload_size = 65535     # bytes
+max_message_age  = 604800    # 7 days in seconds
+rate_limit_rpm   = 600       # per peer
+max_connections  = 500
+
+[ipc]
+socket = "/var/run/gandrd/gandr.sock"
+
+[storage]
+path = "/var/lib/gandrd"

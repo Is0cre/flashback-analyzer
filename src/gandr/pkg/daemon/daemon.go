@@ -11,7 +11,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -55,6 +57,27 @@ type Options struct {
 	// Seeds are hex-decoded Yggdrasil node keys of Gandr nodes to
 	// federate with at startup and keep retrying indefinitely.
 	Seeds [][]byte
+	// Debug enables verbose stderr logging of handshake attempts, peer
+	// table changes, and per-envelope accept/drop decisions (with a
+	// reason). Off by default — this is a deliberate, temporary
+	// exception to "no logging of message content, peer identities, or
+	// who-talked-to-whom": it never logs payload content, only short
+	// (8-hex-char) identity fingerprints and drop reasons, and exists
+	// specifically to make an otherwise perfectly silent protocol
+	// debuggable when something isn't routing. Meant to be turned back
+	// off once whatever's being diagnosed is fixed.
+	Debug bool
+}
+
+// fp shortens an identity/hash to an 8-hex-char fingerprint for debug
+// logging — enough to distinguish peers/messages across a handful of log
+// lines without ever printing a full identity.
+func fp(b []byte) string {
+	s := hex.EncodeToString(b)
+	if len(s) > 8 {
+		s = s[:8]
+	}
+	return s
 }
 
 // EventSink receives events a Daemon can't route anywhere on its own: new
@@ -132,6 +155,16 @@ func (d *Daemon) SetEventSink(sink EventSink) {
 	d.mu.Unlock()
 }
 
+// debugf is a no-op unless Options.Debug is set — see that field's doc
+// comment for why this exists at all in a daemon that's otherwise
+// deliberately silent by design.
+func (d *Daemon) debugf(format string, args ...any) {
+	if !d.opts.Debug {
+		return
+	}
+	log.Printf("gandrd[debug]: "+format, args...)
+}
+
 // RunLoops starts all daemon loops and blocks until the daemon is
 // stopped. The caller is responsible for exposing the daemon to clients
 // (e.g. cmd/gandrd wraps it with ipc.Listen before calling this).
@@ -158,17 +191,22 @@ func (d *Daemon) acceptLoop() {
 	for {
 		conn, err := d.transport.Accept(d.ctx)
 		if err != nil {
+			d.debugf("accept: transport closed: %v", err)
 			return
 		}
+		d.debugf("accept: inbound connection, starting handshake")
 		d.wg.Add(1)
 		go func() {
 			defer d.wg.Done()
 			sess, err := federation.Respond(d.ctx, conn, d.fedCfg)
 			if err != nil {
-				// silence on invalid handshakes: close, say nothing
+				// silence on invalid handshakes in the real protocol path —
+				// debugf is the one deliberate, opt-in exception.
+				d.debugf("accept: handshake failed: %v", err)
 				conn.Close()
 				return
 			}
+			d.debugf("accept: handshake ok, peer=%s", fp(sess.PeerIdentity[:]))
 			d.adoptSession(sess)
 		}()
 	}
@@ -218,26 +256,32 @@ func (d *Daemon) seedConnected(key []byte) bool {
 
 // dialSeed makes one bounded federation attempt to a seed node.
 func (d *Daemon) dialSeed(key []byte) {
+	d.debugf("seed: dialing %s", fp(key))
 	ctx, cancel := context.WithTimeout(d.ctx, seedRetryInterval)
 	defer cancel()
 	conn, err := d.transport.Dial(ctx, network.PeerAddr{YggKey: ed25519.PublicKey(key)})
 	if err != nil {
+		d.debugf("seed: dial %s failed: %v", fp(key), err)
 		return
 	}
 	sess, err := federation.Initiate(ctx, conn, d.fedCfg)
 	if err != nil {
+		d.debugf("seed: handshake with %s failed: %v", fp(key), err)
 		conn.Close()
 		return
 	}
+	d.debugf("seed: handshake with %s ok", fp(key))
 	d.adoptSession(sess)
 }
 
 // adoptSession registers an established session and pumps its messages.
 func (d *Daemon) adoptSession(sess *federation.Session) {
 	if _, err := d.table.Add(sess); err != nil {
+		d.debugf("adopt: table.Add(%s) failed: %v", fp(sess.PeerIdentity[:]), err)
 		sess.Close()
 		return
 	}
+	d.debugf("adopt: peer=%s added, table now has %d peer(s)", fp(sess.PeerIdentity[:]), d.table.Count())
 	d.notifyPeerUpdate()
 	d.wg.Add(1)
 	go func() {
@@ -246,11 +290,13 @@ func (d *Daemon) adoptSession(sess *federation.Session) {
 			// remove only if this session still owns the entry — a
 			// reconnect may have replaced it under the same identity
 			d.table.RemoveSession(sess.PeerIdentity, sess)
+			d.debugf("adopt: peer=%s session ended, table now has %d peer(s)", fp(sess.PeerIdentity[:]), d.table.Count())
 			d.notifyPeerUpdate()
 		}()
 		for {
 			env, err := sess.Recv(d.ctx)
 			if err != nil {
+				d.debugf("recv: peer=%s session closed: %v", fp(sess.PeerIdentity[:]), err)
 				return
 			}
 			d.handleEnvelope(env, sess)
@@ -261,13 +307,17 @@ func (d *Daemon) adoptSession(sess *federation.Session) {
 // handleEnvelope processes one validated envelope from a peer. All
 // rejections are silent.
 func (d *Daemon) handleEnvelope(env *proto.Envelope, from *federation.Session) {
+	sender := fp(env.Sender[:])
 	if err := proto.ValidateTimestamp(env.Timestamp, time.Now()); err != nil {
+		d.debugf("recv: type=%#x from=%s dropped: %v", env.Type, sender, err)
 		return
 	}
 	if len(env.Payload) > int(d.opts.MaxPayloadSize) {
+		d.debugf("recv: type=%#x from=%s dropped: payload too large (%d bytes)", env.Type, sender, len(env.Payload))
 		return
 	}
 	if !d.allowRate(from.PeerIdentity) {
+		d.debugf("recv: type=%#x from=%s dropped: rate limited", env.Type, sender)
 		return
 	}
 	d.table.Touch(from.PeerIdentity)
@@ -276,25 +326,30 @@ func (d *Daemon) handleEnvelope(env *proto.Envelope, from *federation.Session) {
 	case proto.MsgChat, proto.MsgPost, proto.MsgThread, proto.MsgReply,
 		proto.MsgProfile, proto.MsgGuestbook, proto.MsgStatus, proto.MsgSealed:
 		if !d.validatePayload(env) {
+			d.debugf("recv: type=%#x from=%s dropped: invalid payload", env.Type, sender)
 			return
 		}
 		_, existed, err := d.objects.Put(env)
 		if err != nil || existed {
+			d.debugf("recv: type=%#x from=%s dropped: existed=%v err=%v (duplicate flood ends here)", env.Type, sender, existed, err)
 			return // duplicates end the flood here
 		}
 		if env.Type == proto.MsgProfile {
 			d.recordProfile(env)
 		}
+		d.debugf("recv: type=%#x from=%s stored, relaying to table (%d peer(s))", env.Type, sender, d.table.Count())
 		d.relay(env, &from.PeerIdentity)
 		d.push(env)
 	case proto.MsgAck, proto.MsgSealedAck:
 		if !d.validatePayload(env) {
+			d.debugf("recv: type=%#x from=%s dropped: invalid payload", env.Type, sender)
 			return
 		}
 		d.relay(env, &from.PeerIdentity)
 		d.delivered(env)
 	case proto.MsgDelete:
 		if !d.handleDelete(env) {
+			d.debugf("recv: type=%#x from=%s dropped: delete rejected", env.Type, sender)
 			return
 		}
 		d.relay(env, &from.PeerIdentity)
@@ -371,24 +426,37 @@ func (d *Daemon) recordProfile(env *proto.Envelope) {
 // relay floods an envelope to all relaying peers except its origin.
 func (d *Daemon) relay(env *proto.Envelope, except *[32]byte) {
 	if !d.opts.Relay {
+		d.debugf("relay: skipped entirely, Relay=false in Options")
 		return
 	}
-	for _, p := range d.table.List() {
-		if p.Session == nil || p.Trust < proto.TrustNeutral {
+	peers := d.table.List()
+	sent := 0
+	for _, p := range peers {
+		if p.Session == nil {
+			d.debugf("relay: skipping peer=%s: no live session", fp(p.Identity[:]))
+			continue
+		}
+		if p.Trust < proto.TrustNeutral {
+			d.debugf("relay: skipping peer=%s: trust=%d below neutral", fp(p.Identity[:]), p.Trust)
 			continue
 		}
 		if except != nil && p.Identity == *except {
-			continue
+			continue // the origin — not a drop worth logging, this is expected every time
 		}
+		sent++
 		sess := p.Session
+		peerID := p.Identity
 		d.wg.Add(1)
 		go func() {
 			defer d.wg.Done()
 			ctx, cancel := context.WithTimeout(d.ctx, 30*time.Second)
 			defer cancel()
-			sess.Send(ctx, env)
+			if err := sess.Send(ctx, env); err != nil {
+				d.debugf("relay: send to peer=%s failed: %v", fp(peerID[:]), err)
+			}
 		}()
 	}
+	d.debugf("relay: dispatched to %d of %d table peer(s)", sent, len(peers))
 }
 
 // rateWindow is a fixed one-minute message counter.

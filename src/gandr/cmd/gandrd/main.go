@@ -111,6 +111,8 @@ func run() error {
 		MaxPayloadSize: cfg.Limits.MaxPayloadSize,
 		RateLimitRPM:   int(cfg.Limits.RateLimitRPM),
 		Seeds:          seedKeys,
+		// Temporary, opt-in only — see Options.Debug's doc comment.
+		Debug: os.Getenv("GANDRD_DEBUG") != "",
 	}, id, transport, objects)
 	if err != nil {
 		return err

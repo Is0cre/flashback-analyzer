@@ -91,7 +91,7 @@ func (m Model) View() string {
 	}
 	var b strings.Builder
 	b.WriteString(brand.Render("BACKFLASH CACHE // NÄTVERKSKONSOL"))
-	b.WriteString("  " + dim.Render("publik cache-peer · ingen GANDR-data"))
+	b.WriteString("  " + dim.Render("publik cache-peer · ingen E2E-CHATT-data"))
 	b.WriteString("\n\n")
 	status := []string{
 		"STATUS       " + stateView,

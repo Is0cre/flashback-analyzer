@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -32,14 +34,14 @@ type Session struct {
 // in-process transport is unavailable.
 func (s *Subsystem) Connect(socketPath string) (*Session, error) {
 	if s == nil {
-		return nil, errors.New("GANDR-gränsen saknas")
+		return nil, errors.New("E2E-CHATT-gränsen saknas")
 	}
 	s.mu.RLock()
 	id := s.identity
 	keyPath := s.path
 	s.mu.RUnlock()
 	if id == nil {
-		return nil, errors.New("GANDR-valvet är låst")
+		return nil, errors.New("E2E-CHATT-valvet är låst")
 	}
 	dataDir := filepath.Dir(keyPath)
 	db, err := gandrclientdb.Open(filepath.Join(dataDir, "client.db"), id.PrivateKey)
@@ -75,7 +77,7 @@ func (s *Session) Close() error {
 // to the rest of BACKFLASH.
 func (s *Session) Channels() ([]Channel, error) {
 	if s == nil || s.db == nil {
-		return nil, errors.New("GANDR-sessionen är inte aktiv")
+		return nil, errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	channels, err := s.db.ListChannels()
 	if err != nil {
@@ -108,7 +110,7 @@ func (s *Session) Done() <-chan struct{} {
 // Subscribe joins a GANDR channel through the local daemon.
 func (s *Session) Subscribe(ctx context.Context, id [32]byte) error {
 	if s == nil {
-		return errors.New("GANDR-sessionen är inte aktiv")
+		return errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	if s.client == nil {
 		return nil
@@ -118,7 +120,7 @@ func (s *Session) Subscribe(ctx context.Context, id [32]byte) error {
 
 func (s *Session) Join(ctx context.Context, name string) ([]Channel, error) {
 	if s == nil || s.db == nil {
-		return nil, errors.New("GANDR-sessionen är inte aktiv")
+		return nil, errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	id := ChannelID(name)
 	if err := s.db.JoinChannel(id, name); err != nil {
@@ -132,7 +134,7 @@ func (s *Session) Join(ctx context.Context, name string) ([]Channel, error) {
 
 func (s *Session) Leave(ctx context.Context, id [32]byte) ([]Channel, error) {
 	if s == nil || s.db == nil {
-		return nil, errors.New("GANDR-sessionen är inte aktiv")
+		return nil, errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	if s.client != nil {
 		_ = s.client.Unsubscribe(ctx, id)
@@ -145,7 +147,7 @@ func (s *Session) Leave(ctx context.Context, id [32]byte) ([]Channel, error) {
 
 func (s *Session) SendChannel(ctx context.Context, id [32]byte, content string) error {
 	if s == nil || s.id == nil {
-		return errors.New("GANDR-sessionen är inte aktiv")
+		return errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	payload, err := proto.EncodePayload(&proto.ChatPayload{ChannelID: id, Content: content})
 	if err != nil {
@@ -216,7 +218,7 @@ var DefaultChannels = []string{"general", "support", "backflash", "offtopic"}
 
 func (s *Session) EnsureDefaultChannels(ctx context.Context) ([]Channel, error) {
 	if s == nil || s.db == nil {
-		return nil, errors.New("GANDR-sessionen är inte aktiv")
+		return nil, errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	channels, err := s.Channels()
 	if err != nil {
@@ -235,7 +237,7 @@ func (s *Session) EnsureDefaultChannels(ctx context.Context) ([]Channel, error) 
 
 func (s *Session) Contacts() ([]Contact, error) {
 	if s == nil || s.db == nil {
-		return nil, errors.New("GANDR-sessionen är inte aktiv")
+		return nil, errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	items, err := s.db.ListNicknames()
 	if err != nil {
@@ -252,14 +254,14 @@ func (s *Session) Contacts() ([]Contact, error) {
 // a network message or public BACKFLASH cache object.
 func (s *Session) AddContact(pubkey [32]byte, name, note string) error {
 	if s == nil || s.db == nil {
-		return errors.New("GANDR-sessionen är inte aktiv")
+		return errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	return s.db.SetNickname(gandrclientdb.Nickname{Pubkey: pubkey, Name: name, Note: note})
 }
 
 func (s *Session) SaveMessage(m ChatMessage) error {
 	if s == nil || s.db == nil {
-		return errors.New("GANDR-sessionen är inte aktiv")
+		return errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	return s.db.SaveChatMessage(gandrclientdb.ChatMessage{
 		Hash: m.Hash, ChannelID: m.ChannelID, Sender: m.Sender,
@@ -269,7 +271,7 @@ func (s *Session) SaveMessage(m ChatMessage) error {
 
 func (s *Session) Messages(channelID [32]byte, limit int) ([]ChatMessage, error) {
 	if s == nil || s.db == nil {
-		return nil, errors.New("GANDR-sessionen är inte aktiv")
+		return nil, errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	items, err := s.db.ListChatMessages(channelID, limit)
 	if err != nil {
@@ -287,7 +289,7 @@ func (s *Session) Messages(channelID [32]byte, limit int) ([]ChatMessage, error)
 
 func (s *Session) CreatePrivateGroup(name, password string) (PrivateGroup, error) {
 	if s == nil || s.db == nil {
-		return PrivateGroup{}, errors.New("GANDR-sessionen är inte aktiv")
+		return PrivateGroup{}, errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	if strings.TrimSpace(name) == "" {
 		return PrivateGroup{}, errors.New("gruppnamn saknas")
@@ -320,7 +322,7 @@ func (s *Session) CreatePrivateGroup(name, password string) (PrivateGroup, error
 
 func (s *Session) PrivateGroups() ([]PrivateGroup, error) {
 	if s == nil || s.db == nil {
-		return nil, errors.New("GANDR-sessionen är inte aktiv")
+		return nil, errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	items, err := s.db.ListPrivateGroups()
 	if err != nil {
@@ -335,7 +337,7 @@ func (s *Session) PrivateGroups() ([]PrivateGroup, error) {
 
 func (s *Session) UnlockPrivateGroup(id [32]byte, password string) error {
 	if s == nil || s.db == nil {
-		return errors.New("GANDR-sessionen är inte aktiv")
+		return errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	items, err := s.db.ListPrivateGroups()
 	if err != nil {
@@ -412,9 +414,46 @@ func (s *Session) PrivateGroupMessages(id [32]byte, limit int) ([]PrivateGroupMe
 
 func (s *Session) Block(pubkey [32]byte, reason string) error {
 	if s == nil || s.db == nil {
-		return errors.New("GANDR-sessionen är inte aktiv")
+		return errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	return s.db.Block(pubkey, reason)
+}
+
+// ConnectPeer asks the local gandrd daemon to dial and federate with
+// another node's Yggdrasil transport key (not its GANDR identity key — the
+// two are always separate, see gandrd's own startup log:
+// "gandrd: yggdrasil node key: <hex>"). Both nodes only need to be
+// reachable on the wider Yggdrasil overlay — no direct IP/port between the
+// two users is required, the same way two Tor or I2P nodes don't need one.
+// This wraps an IPC request gandrd already implements and tests
+// end-to-end; it isn't new protocol behavior, just a BACKFLASH-side path
+// to trigger it, which was previously missing entirely.
+func (s *Session) ConnectPeer(ctx context.Context, yggKeyHex string) error {
+	// Validate the input first: a typo'd key should be reported immediately
+	// regardless of connection state, rather than being masked by "gandrd
+	// isn't running" when the daemon isn't even the problem.
+	key, err := parseYggKey(yggKeyHex)
+	if err != nil {
+		return err
+	}
+	if s == nil || s.client == nil {
+		return errors.New("E2E-CHATT-sessionen är inte ansluten till gandrd")
+	}
+	return s.client.Connect(ctx, key)
+}
+
+func parseYggKey(hexKey string) ([32]byte, error) {
+	var key [32]byte
+	hexKey = strings.TrimSpace(hexKey)
+	if len(hexKey) != 64 {
+		return key, errors.New("yggdrasil-nyckeln ska vara 64 hextecken")
+	}
+	decoded, err := hex.DecodeString(hexKey)
+	if err != nil {
+		return key, fmt.Errorf("ogiltig yggdrasil-nyckel: %w", err)
+	}
+	copy(key[:], decoded)
+	return key, nil
 }
 
 func (s *Session) Peers(ctx context.Context) ([]Peer, error) {
@@ -443,7 +482,7 @@ type Message struct {
 
 func DecodeChat(env *proto.Envelope) (Message, error) {
 	if env == nil || env.Type != proto.MsgChat {
-		return Message{}, errors.New("GANDR-paketet är inte ett chattmeddelande")
+		return Message{}, errors.New("E2E-CHATT-paketet är inte ett chattmeddelande")
 	}
 	payload := &proto.ChatPayload{}
 	if err := proto.DecodePayload(env.Payload, payload); err != nil {

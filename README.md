@@ -1,22 +1,48 @@
-# Flashback Analyzer
+# BACKFLASH
 
-## BACKFLASH
+[![CI](https://github.com/Is0cre/flashback-analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/Is0cre/flashback-analyzer/actions/workflows/ci.yml)
 
-BACKFLASH är en fristående terminalklient och analysvy för innehåll från
-Flashback. Den fokuserar på tangentbordsnavigering, hög informationstäthet,
-lokal cache, sökning, trådanalys och en återhållsam diskursövervakning för
-nattpasset. ASCII-logotypen och den bakfulla terminalhunden är egna
-identitetselement; BACKFLASH är inte en officiell Flashback-klient.
+![BACKFLASH](assets/backflash.png)
 
-## Go-klienten
+BACKFLASH är en fristående terminalklient för nattpasset: en läsare och
+analysvy för Flashback, en karta över Polisens publika händelseflöde med
+närhetslarm, ett frivilligt P2P-cachenät över Yggdrasil, och en inbyggd
+end-to-end-krypterad chatt inspirerad av gammal IRC. Allt körs lokalt, allt
+är tangentbordsstyrt, och ingenting postar tillbaka till Flashback.
 
-Go-klienten är den aktiva och distribuerbara implementationen. Den använder
-Bubble Tea, SQLite och Flashbacks strukturella HTML-adapter. Python-versionen
-är utfasad; kvarvarande HTML-fixtures används av Go-testsviten.
+ASCII-logotypen och den bakfulla terminalhunden är egna identitetselement;
+BACKFLASH är inte en officiell Flashback-klient.
+
+## Vad BACKFLASH gör
+
+- **Forum** — bläddrar och cachar Flashbacks forumträd och trådar lokalt i
+  SQLite, med full FTS5-sökning offline. Read-only: verktyget postar,
+  loggar in och kringgår aldrig CAPTCHA/ålderskontroll.
+- **Polishändelser** — hämtar Polisens publika händelse-API, ritar dem som
+  en färgkodad karta över Sverige direkt i terminalen (halvblockstecken,
+  ingen bild/Sixel behövs) sida vid sida med händelselistan, och kan larma
+  (terminalpip + bannerprompt) när en ny händelse dyker upp nära din egen
+  plats — se [Närhetslarm](#närhetslarm) nedan.
+- **Cache-mesh** — en frivillig, publik cache av redan hämtat
+  Flashback-innehåll delad över ett inbäddat Yggdrasil-nät. Avstängd som
+  standard; se [docs/mesh-runtime.md](docs/mesh-runtime.md).
+- **BACKFLASH E2E-CHATT** — en IRC-inspirerad gruppchatt byggd på
+  [Gandr](src/gandr/README.md), ett fristående federerat protokoll: Ed25519-
+  identitet i stället för konto, petnamn i stället för användarnamn, inga
+  serverloggar av vem som pratar med vem, och all trafik dubbelkrypterad
+  över Yggdrasil. Se [Chatten](#backflash-e2e-chatt) nedan.
+
+## Installation
+
+```bash
+go build -o backflash ./cmd/backflash
+./backflash version
+```
+
+eller kör direkt utan att bygga en binär:
 
 ```bash
 go run ./cmd/backflash
-go run ./cmd/backflash version
 ```
 
 ### Windows
@@ -31,175 +57,109 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 Skriptet skapar lokal konfiguration och frågar separat om TCP-port 4242 ska
 öppnas för den frivilliga publika cache-meshen. Vanlig lokal läsning kräver
-ingen brandväggsregel och mesh är avstängt som standard. Fullständig Windows-
-installation finns i [docs/install-windows.md](docs/install-windows.md).
+ingen brandväggsregel och mesh är avstängt som standard. Fullständig
+Windows-installation finns i [docs/install-windows.md](docs/install-windows.md).
 
-Read-only grund för att samla in och analysera Flashback-trådar utan att blanda ihop citerad text med nya påståenden.
+## Snabbstart
 
-## Vad v0.1 gör
+`backflash` (eller `go run ./cmd/backflash`) öppnar direkt i det lokala
+NOC-dashboardet. Ingen nätverksanslutning krävs för att läsa redan lagrat
+innehåll.
 
-- tar en `https://www.flashback.org/t<ID>`-URL
-- hämtar trådsidor försiktigt med minst 5.2 s mellan nya nätanrop
-- cachear HTML lokalt
-- parsar post-ID, användare, tid, synligt postnummer, text, citat och länkar
-- lagrar allt i SQLite
-- sparar rå HTML per trådsida samt källa och innehållshash för varje post
-- kan synkronisera den senast kända sidans svans och nya sidor idempotent
-- normaliserar länkar och visar domän, unika URL:er och unika länkande användare
-- delar trådar deterministiskt i kronologiska analyssegment
-- visar deltagarstatistik, topplista, Top-10-andel, Gini och HHI
-- har tomma men färdiga tabeller för kommande stance/opinionsanalys
-- söker lokalt i sparade inlägg med SQLite FTS5
+Tangentbord (globalt, oavsett vy):
 
-Verktyget är medvetet read-only. Det postar ingenting till Flashback.
-En explicit session-provider-gräns finns för framtida legitima inloggade
-funktioner; klienten läser eller skapar inte lösenord och försöker inte kringgå
-inloggning, CAPTCHA eller ålderskontroll.
+| Tangent | Vy |
+| --- | --- |
+| `h` | Översikt / dashboard |
+| `f` | Forum |
+| `/` | Fjärrsök på Flashback |
+| `p` | Polishändelser + karta |
+| `m` | Cache-mesh |
+| `g` | BACKFLASH E2E-CHATT |
+| `ctrl+p` / `?` | Kommandopalett |
+| `q` / `ctrl+c` | Tillbaka / avsluta |
 
-## Installation
+`j`/`k` eller piltangenterna flyttar markören i listor; `Enter` öppnar det
+markerade objektet. Musen fungerar också (klick + scroll) där terminalen
+stödjer det.
 
-```bash
-go build -o backflash ./cmd/backflash
-./backflash version
-```
+## Polishändelser & närhetslarm
 
-## Första körningen
+`p` öppnar kartan: Polisens senaste händelser ritas som färgkodade punkter
+över en handritad Sverigesilhuett, med händelselistan bredvid på breda
+terminaler. Markera en rad i listan för att se dess punkt lysa upp på
+kartan.
 
-Starta den lokala terminal-läsaren direkt:
+### Närhetslarm
 
-```bash
-fb
-```
-
-Den öppnar redan lagrade trådar utan nätverk. `fb tui t<ID>` är en explicit
-alternativ start med en viss tråd.
-
-Hämta första sidan:
+Larmet är helt opt-in och avstängt som standard. Sätt en radie i kilometer
+för att slå på det:
 
 ```bash
-fb ingest 'https://www.flashback.org/t3322511'
+BACKFLASH_ALERT_RADIUS_KM=10 backflash
 ```
 
-Hämta exempelvis fem sidor totalt från startsidan:
+Vid start slår BACKFLASH då upp en ungefärlig plats via en gratis
+IP-geolokaliseringstjänst (endast din publika IP lämnar maskinen — inga
+konton, inga nycklar) och pollar sedan Polisens flöde i bakgrunden oavsett
+vilken vy du står i. En ny händelse inom radien ringer terminalens
+pip-signal och visar en röd larmbanner tills den kvitteras med `a`.
+`BACKFLASH_MUTE=1` stänger av alla ljud (larm och notiser) utan att stänga
+av larmlogiken i sig.
 
-```bash
-fb ingest 'https://www.flashback.org/t3322511' --pages 5
-```
+## BACKFLASH E2E-CHATT
 
-Hämta alla sidor som discoveras från första sidan:
+Chatten är BACKFLASH:s UI mot [Gandr](src/gandr/README.md) — en fristående,
+federerad protokollimplementation som lever i det här repot
+(`src/gandr` för protokoll/daemon, `internal/gandr` för BACKFLASH:s
+klientlager). Det är inte "krypterad Discord": det finns ingen server som
+äger din identitet.
 
-```bash
-fb ingest 'https://www.flashback.org/t3322511' --all
-```
+- **Identitet = nyckel, inte konto.** Ed25519-nyckelpar, inga lösenord
+  skickas någonstans, inga e-postadresser.
+- **Petnamn, inte användarnamn.** Namn du sätter på andras nycklar lever
+  bara i din egen krypterade lokala databas — de skickas aldrig över
+  nätet och syns aldrig för någon annan.
+- **Dubbel kryptering.** Yggdrasil-transporten är krypterad i sig; Gandr
+  lägger på en egen signerad, krypterad sessionsnivå ovanpå. Noden som
+  routar trafiken kan inte läsa den.
+- **Inga metadata-loggar.** Ingen logg över vem som pratade med vem, inga
+  analytics, ingen telemetri. En beslagtagen nod ger ingenting användbart.
+- **Routat över Yggdrasil**, inbäddat direkt i klienten — inget separat
+  VPN, ingen TUN, inget root-krav.
 
-Visa rå parser-kvalitet innan någon AI kopplas in:
+Starta med `g` i BACKFLASH. Första gången skapas ett lokalt valv (lösenord
+krypterar din identitetsnyckel på disk); `gandrd` behöver köra separat som
+daemon för att faktiskt nå andra noder — se
+[src/gandr/README.md](src/gandr/README.md) för protokolldetaljer och
+[src/gandr/docs/SETUP.md](src/gandr/docs/SETUP.md) för att sätta upp en
+daemon.
 
-```bash
-fb inspect t3322511 --limit 20
-```
+### Peering
 
-Visa statistik:
+Gandr har inget centralt failover eller katalogserver — bara noder som
+väljer att peera med varandra, precis som gammal IRC-federation. En "seed"
+är bara en välkänd första kontakt, inte en auktoritet: en `gandrd`-daemon
+körd på backflash-cache-servern med enda uppgift att hjälpa nya klienter
+hitta sin första peer över Yggdrasil. Den ser aldrig meddelandeinnehåll
+och lagrar inget som går att koppla till en identitet om den beslagtas —
+en kurir, inte en värd, precis som vilken annan nod som helst.
 
-```bash
-fb stats t3322511
-```
+BACKFLASH ansluter automatiskt till den publika seeden första gången
+chatten startas, så en ny användare aldrig behöver veta vad en
+Yggdrasil-nyckel ens är. Nyckeln bakas in i klienten
+(`defaultSeedYggdrasilKey` i `internal/tui/app.go`) — sätt
+`BACKFLASH_SEED_KEY=<64 hex>` för att peka på en egen seed i stället, eller
+`BACKFLASH_SEED_KEY=-` för att stänga av auto-anslutningen helt.
 
-Synkronisera endast trådens aktuella slut:
+## Cache-mesh
 
-```bash
-fb sync t3322511
-```
-
-Visa metadata:
-
-```bash
-fb thread-info t3322511
-```
-
-Visa normaliserad länkanvändning per domän:
-
-```bash
-fb links t3322511
-```
-
-Bygg och visa analyssegment (75 inlägg som standard):
-
-```bash
-fb segments t3322511
-```
-
-Segmentgränser och medlemskap lagras separat från rådata i `segments` och
-`segment_posts`. Segmentens sammanfattning är avsiktligt tom tills en
-versionshanterad analysleverantör införs.
-
-Hitta återkommande ämneskandidater:
-
-```bash
-fb topics t3322511
-```
-
-Den första implementationen använder en konservativ, reproducerbar lexikal
-baslinje. Ämnena är kandidater och ska inte tolkas som färdiga frågor eller
-positioner.
-
-Frågekandidater från uttryckliga frågetecken kan visas med:
-
-```bash
-fb questions t3742384C
-```
-
-Detta lager återger bara frågor som faktiskt skrivits i inläggen. Det fyller
-inte i svarsalternativ eller tolkar en fråga som en ståndpunkt.
-
-En liten interaktiv terminalvy finns också:
-
-```bash
-fb tui t3742384C
-```
-
-`fb` utan subkommando öppnar den lokala Textual-läsaren direkt. Den kräver
-ingen nätverksanslutning för att läsa redan lagrade trådar.
-
-Utan trådargument öppnas trådlistan. Där kan du lägga till en ny tråd, ange
-antal sidor att hämta eller välja att hämta alla upptäckta sidor:
-
-```bash
-fb tui
-```
-
-Vid start läser TUI:t också de cacheade/live listorna för aktuella, populära,
-nya ämnen och nya inlägg. Välj en rad med dess nummer för att börja hämta
-tråden. Tryck `r` i trådlistan för att uppdatera listorna.
-
-Discovery-resultat sparas i SQLite, så den senast kända listan visas även om
-forumets live-sidor tillfälligt inte kan hämtas.
-
-Tryck `f` i Textual-läsaren för att bläddra i Flashbacks cacheade forumträd.
-`Enter` öppnar kategori/forum, `b` går upp, `t` återgår till sparade trådar och
-`r` uppdaterar den aktuella nivån. Forumträdet cacheas i SQLite och visas
-offline; en ny tråd hämtas först när den väljs.
-
-I en öppnad tråd trycker du `/` för att söka i lokalt cacheade inlägg och
-användarnamn. Sökningen gör inga fjärranrop.
-
-Live-listan visar visningar, läsare och svar innan hämtning. TUI:t hämtar en
-sida som standard, visar en grov siduppskattning och kräver extra bekräftelse
-för att hämta hela trådar med minst 1 000 svar.
-
-TUI:t är kompakt som standard. Visa ANSI-logotypen uttryckligen med:
-
-```bash
-fb tui --logo
-```
-
-Menyerna navigeras med ↑/↓ och Enter. q eller Escape avslutar en meny; text
-behövs bara när du anger tråd eller antal sidor.
-
-The TUI displays the repository ANSI logo from `assets/ansi-art.utf.ans`
-when available.
-
-Alla kommandon accepterar korta referenser som `t3742384C`; fullständig
-`https://www.flashback.org/`-URL behövs inte.
+En frivillig, publik cache av redan hämtat Flashback-innehåll, delad mellan
+BACKFLASH-noder över ett inbäddat Yggdrasil-nät — avstängd som standard,
+egen identitet helt separerad från Gandr/chatten. Se
+[docs/mesh-runtime.md](docs/mesh-runtime.md) för identitet, konfiguration
+och drift, och [docs/cache-node-debian.md](docs/cache-node-debian.md) för
+att sätta upp en publik cache-peer.
 
 ## Datamodell
 
@@ -212,11 +172,13 @@ threads ──< posts >── users
 ```
 
 `raw_pages` bevarar hämtad HTML med hash och källa. `posts.content_hash` och
-`posts.source_url` gör varje normaliserat inlägg spårbart. `schema_version` och
-additiva migreringar gör att äldre SQLite-filer kan öppnas utan att data skrivs
-om eller förloras.
+`posts.source_url` gör varje normaliserat inlägg spårbart. `schema_version`
+och additiva migreringar gör att äldre SQLite-filer kan öppnas utan att data
+skrivs om eller förloras.
 
-Citaten ligger separat. `posts.text` försöker endast innehålla vad skribenten själv skrev, medan `posts.raw_text` behåller hela det renderade meddelandet för felsökning.
+Citaten ligger separat. `posts.text` försöker endast innehålla vad
+skribenten själv skrev, medan `posts.raw_text` behåller hela det renderade
+meddelandet för felsökning.
 
 ## Nästa steg: opinion
 
@@ -248,4 +210,18 @@ Det gör att en extremt aktiv användare aldrig automatiskt blir "100 röster".
 
 ## Viktigt om parsern
 
-Flashbacks HTML kan ändras. Parsern använder därför flera fallbacks. Kör alltid `fb inspect` på en verklig tråd efter installation och lägg en anonymiserad HTML-fixture i `tests/fixtures/` när du hittar en struktur parsern missar.
+Flashbacks HTML kan ändras. Parsern använder därför flera fallbacks. Lägg en
+anonymiserad HTML-fixture i `tests/fixtures/` när du hittar en struktur
+parsern missar.
+
+## Utveckling
+
+```bash
+go test ./...
+go vet ./...
+CGO_ENABLED=0 go build ./...
+```
+
+Samma tre steg körs i CI (`.github/workflows/ci.yml`) på varje push och PR
+mot `main`. Releaser byggs från git-taggar av formatet `v*` — se
+[docs/releases.md](docs/releases.md).

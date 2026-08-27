@@ -3,5 +3,13 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 *.sqlite3
+*.sqlite3.bak
 data/cache/*.html
 !data/cache/.gitkeep
+src/data/
+
+# local build output, not release artifacts (those are attached to GitHub
+# Releases per docs/releases.md)
+/backflash
+/backflash-cache
+/backflash-windows-amd64.exe

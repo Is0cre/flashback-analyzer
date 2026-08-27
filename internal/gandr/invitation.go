@@ -32,7 +32,7 @@ func invitationPayload(inv contactInvitation) []byte {
 // stores or interprets it as a public cache object.
 func (s *Session) CreateInvitation() (string, error) {
 	if s == nil || s.id == nil {
-		return "", errors.New("GANDR-sessionen är inte aktiv")
+		return "", errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	now := time.Now().Unix()
 	inv := contactInvitation{
@@ -55,10 +55,10 @@ func (s *Session) CreateInvitation() (string, error) {
 // petname; the sender cannot force a name into the recipient's client.
 func (s *Session) AcceptInvitation(token, name string) ([32]byte, error) {
 	if s == nil || s.db == nil {
-		return [32]byte{}, errors.New("GANDR-sessionen är inte aktiv")
+		return [32]byte{}, errors.New("E2E-CHATT-sessionen är inte aktiv")
 	}
 	if !strings.HasPrefix(token, "BFI1.") {
-		return [32]byte{}, errors.New("ogiltig GANDR-inbjudan")
+		return [32]byte{}, errors.New("ogiltig E2E-CHATT-inbjudan")
 	}
 	b, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(token, "BFI1."))
 	if err != nil {
@@ -84,7 +84,7 @@ func (s *Session) AcceptInvitation(token, name string) ([32]byte, error) {
 	if strings.TrimSpace(name) == "" {
 		name = "~" + hex.EncodeToString(pub[:4])
 	}
-	if err := s.AddContact(pubkey, name, "via signerad GANDR-inbjudan"); err != nil {
+	if err := s.AddContact(pubkey, name, "via signerad E2E-CHATT-inbjudan"); err != nil {
 		return [32]byte{}, fmt.Errorf("kontakten kunde inte sparas: %w", err)
 	}
 	return pubkey, nil

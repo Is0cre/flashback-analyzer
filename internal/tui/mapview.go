@@ -157,7 +157,7 @@ const landColor = "24" // muted chart-blue, distinct from every category color
 // row packs two vertical pixels (top half via foreground, bottom half via
 // background), doubling the effective vertical resolution of the old
 // character-grid map.
-func renderSwedenMap(events []external.ExternalEvent, maxWidth, rows int) string {
+func renderSwedenMap(events []external.ExternalEvent, maxWidth, rows int, highlight int) string {
 	if rows < 8 {
 		rows = 8
 	}
@@ -203,7 +203,11 @@ func renderSwedenMap(events []external.ExternalEvent, maxWidth, rows int) string
 	}
 	counts := make([]int, len(policeCategories))
 	points := 0
-	for _, event := range events {
+	// highlightY/X pinpoint the pixel of the list's currently selected event
+	// (if it has coordinates and is in range), so the caller's list cursor
+	// and the map dot it corresponds to stay visibly in sync.
+	highlightY, highlightX := -1, -1
+	for i, event := range events {
 		if event.Latitude == nil || event.Longitude == nil {
 			continue
 		}
@@ -216,6 +220,9 @@ func renderSwedenMap(events []external.ExternalEvent, maxWidth, rows int) string
 		dotCategory[y][x] = idx
 		counts[idx]++
 		points++
+		if i == highlight {
+			highlightY, highlightX = y, x
+		}
 	}
 
 	var b strings.Builder
@@ -225,20 +232,27 @@ func renderSwedenMap(events []external.ExternalEvent, maxWidth, rows int) string
 		return b.String()
 	}
 
-	pixelColor := func(y, x int) (color string, set bool) {
+	// highlightColor is a bright white distinct from every category color and
+	// from landColor, so the selected dot reads as "selected" rather than
+	// just another category.
+	const highlightColor = "231"
+	pixelColor := func(y, x int) (color string, bold, set bool) {
+		if y == highlightY && x == highlightX {
+			return highlightColor, true, true
+		}
 		if idx := dotCategory[y][x]; idx >= 0 {
-			return policeCategories[idx].Color, true
+			return policeCategories[idx].Color, false, true
 		}
 		if land[y][x] {
-			return landColor, true
+			return landColor, false, true
 		}
-		return "", false
+		return "", false, false
 	}
 	for row := 0; row < rows; row++ {
 		var line strings.Builder
 		for x := 0; x < width; x++ {
-			top, topSet := pixelColor(row*2, x)
-			bottom, bottomSet := pixelColor(row*2+1, x)
+			top, topBold, topSet := pixelColor(row*2, x)
+			bottom, bottomBold, bottomSet := pixelColor(row*2+1, x)
 			switch {
 			case !topSet && !bottomSet:
 				// Neither half has land or an event: leave the cell blank
@@ -246,17 +260,17 @@ func renderSwedenMap(events []external.ExternalEvent, maxWidth, rows int) string
 				line.WriteRune(' ')
 			case topSet && bottomSet:
 				// ▀'s foreground paints the top half, background the bottom.
-				style := lipgloss.NewStyle().Foreground(lipgloss.Color(top)).Background(lipgloss.Color(bottom))
+				style := lipgloss.NewStyle().Foreground(lipgloss.Color(top)).Background(lipgloss.Color(bottom)).Bold(topBold)
 				line.WriteString(style.Render("▀"))
 			case topSet:
 				// Only the top half is set; leave the background unset so
 				// the bottom half stays transparent instead of also top-colored.
-				line.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(top)).Render("▀"))
+				line.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(top)).Bold(topBold).Render("▀"))
 			default:
 				// Only the bottom half is set: ▄'s foreground paints the
 				// bottom half, so the (unset) background keeps the top
 				// half transparent.
-				line.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(bottom)).Render("▄"))
+				line.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(bottom)).Bold(bottomBold).Render("▄"))
 			}
 		}
 		b.WriteString(line.String() + "\n")

@@ -67,7 +67,7 @@ func defaultIdentityPath() string {
 // never sends the passphrase or identity to BACKFLASH mesh/Flashback.
 func (s *Subsystem) Unlock(passphrase string) error {
 	if s == nil {
-		return errors.New("GANDR-gränsen saknas")
+		return errors.New("E2E-CHATT-gränsen saknas")
 	}
 	id, err := gandridentity.Load(s.path, []byte(passphrase))
 	s.mu.Lock()
@@ -103,13 +103,13 @@ func (s *Subsystem) HasVault() bool {
 // overwritten; destroying an old identity is a separate, deliberate action.
 func (s *Subsystem) Create(passphrase string) error {
 	if s == nil {
-		return errors.New("GANDR-gränsen saknas")
+		return errors.New("E2E-CHATT-gränsen saknas")
 	}
 	if passphrase == "" {
-		return errors.New("GANDR-lösenordet får inte vara tomt")
+		return errors.New("E2E-CHATT-lösenordet får inte vara tomt")
 	}
 	if s.HasVault() {
-		return errors.New("GANDR-valvet finns redan")
+		return errors.New("E2E-CHATT-valvet finns redan")
 	}
 	id, err := gandridentity.Generate("")
 	if err != nil {
@@ -144,12 +144,12 @@ func (s *Subsystem) Lock() {
 // Flashback cookies, or public cache objects.
 func (s *Subsystem) DeleteVault() error {
 	if s == nil {
-		return errors.New("GANDR-gränsen saknas")
+		return errors.New("E2E-CHATT-gränsen saknas")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.identity != nil {
-		return errors.New("lås GANDR-valvet innan radering")
+		return errors.New("lås E2E-CHATT-valvet innan radering")
 	}
 	if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err

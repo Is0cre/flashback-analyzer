@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"github.com/backflash-cli/backflash/internal/external"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 )
 
 func TestFillPolygonFillsInsideAndLeavesOutsideEmpty(t *testing.T) {
@@ -40,7 +42,7 @@ func TestSwedenProjectionOrdersNorthAboveSouth(t *testing.T) {
 func TestRenderSwedenMapPlacesEventsAsColoredPixelsWithinCanvas(t *testing.T) {
 	lat, lon := 59.33, 18.06 // Stockholm — well inside Sweden's bounding box
 	events := []external.ExternalEvent{{EventType: "Mord/dråp", Latitude: &lat, Longitude: &lon}}
-	got := renderSwedenMap(events, 60, 16)
+	got := renderSwedenMap(events, 60, 16, -1)
 	for _, line := range strings.Split(got, "\n") {
 		if w := ansi.StringWidth(line); w > 60 {
 			t.Fatalf("kartrad bredare än duken: %d > 60: %q", w, line)
@@ -48,5 +50,22 @@ func TestRenderSwedenMapPlacesEventsAsColoredPixelsWithinCanvas(t *testing.T) {
 	}
 	if !strings.Contains(got, "VÅLD 1") {
 		t.Fatalf("kartlegenden saknar den enda händelsen: %s", got)
+	}
+}
+
+func TestRenderSwedenMapHighlightsSelectedEventsDot(t *testing.T) {
+	// Color-only differences are invisible under the test binary's default
+	// color profile (no tty attached), so force true color the same way the
+	// other style-sensitive tests in this package do.
+	original := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(original)
+
+	lat, lon := 59.33, 18.06
+	events := []external.ExternalEvent{{EventType: "Mord/dråp", Latitude: &lat, Longitude: &lon}}
+	withHighlight := renderSwedenMap(events, 60, 16, 0)
+	withoutHighlight := renderSwedenMap(events, 60, 16, -1)
+	if withHighlight == withoutHighlight {
+		t.Fatal("den markerade listraden gav ingen synlig skillnad på kartan")
 	}
 }

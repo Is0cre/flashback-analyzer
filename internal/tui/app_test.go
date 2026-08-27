@@ -9,6 +9,7 @@ import (
 	"github.com/backflash-cli/backflash/internal/external"
 	"github.com/backflash-cli/backflash/internal/flashback"
 	"github.com/backflash-cli/backflash/internal/gandr"
+	"github.com/backflash-cli/backflash/internal/geo"
 	"github.com/backflash-cli/backflash/internal/store"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -192,7 +193,7 @@ func TestGandrSidebarRowsStayAlignedWithClickActions(t *testing.T) {
 	// Before this fix, the mouse handler hand-counted row offsets
 	// separately from the render loop, and they had drifted apart:
 	// clicking "+ skapa privat grupp" actually fired the join-channel
-	// action, and clicking "[!] radera GANDR-valv" fired create-group.
+	// action, and clicking "[!] radera E2E-CHATT-valv" fired create-group.
 	// gandrSidebarRows is now the single source both sides read from, so
 	// lines and actions can never drift again — this pins that invariant.
 	subsystem := gandr.NewAt(filepath.Join(t.TempDir(), "gandr", "identity.key"))
@@ -228,9 +229,9 @@ func TestGandrSidebarRowsStayAlignedWithClickActions(t *testing.T) {
 	// whatever the old hand-counted offset happened to land on.
 	deleteIdx := createGroupIdx + 1
 	if actions[deleteIdx].Kind != gandrActionDeleteVault {
-		t.Fatalf("'[!] radera GANDR-valv' pekar inte på gandrActionDeleteVault: rad %d = %#v (%q)", deleteIdx, actions[deleteIdx], lines[deleteIdx])
+		t.Fatalf("'[!] radera E2E-CHATT-valv' pekar inte på gandrActionDeleteVault: rad %d = %#v (%q)", deleteIdx, actions[deleteIdx], lines[deleteIdx])
 	}
-	if !strings.Contains(lines[deleteIdx], "radera GANDR-valv") {
+	if !strings.Contains(lines[deleteIdx], "radera E2E-CHATT-valv") {
 		t.Fatalf("index %d matchar inte den rad den påstår sig vara: %q", deleteIdx, lines[deleteIdx])
 	}
 	// The one private group must be clickable too — this row didn't exist
@@ -262,6 +263,131 @@ func TestClickingLockedGroupPromptsForPassword(t *testing.T) {
 	}
 	if updated.GandrActiveGroup != nil {
 		t.Fatal("en låst grupp öppnades utan lösenord")
+	}
+}
+
+func TestSlashConnectDispatchesToGandrSession(t *testing.T) {
+	subsystem := gandr.NewAt(filepath.Join(t.TempDir(), "gandr", "identity.key"))
+	if err := subsystem.Create("password"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := subsystem.Connect("") // no daemon in this test env — offline mode
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	a := New(nil, nil)
+	a.CurrentView = ViewGandrChat
+	a.GandrSession = session
+	a.Input.Focus()
+	a.Input.SetValue("/connect " + strings.Repeat("ab", 32))
+
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("/connect gav inget kommando")
+	}
+	msg, ok := cmd().(gandrConnectMsg)
+	if !ok {
+		t.Fatalf("förväntade gandrConnectMsg, fick %#v", msg)
+	}
+	// No daemon running in this test, so the connect attempt itself fails —
+	// what matters here is that /connect actually reached ConnectPeer
+	// instead of being swallowed as an unrecognized command or a chat
+	// message to a channel that doesn't exist.
+	if msg.err == nil || !strings.Contains(msg.err.Error(), "gandrd") {
+		t.Fatalf("förväntade ett gandrd-anslutningsfel, fick: %v", msg.err)
+	}
+}
+
+func TestGandrSessionStartAutoConnectsToConfiguredSeed(t *testing.T) {
+	subsystem := gandr.NewAt(filepath.Join(t.TempDir(), "gandr", "identity.key"))
+	if err := subsystem.Create("password"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := subsystem.Connect("") // no daemon in this test env — offline mode
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	a := New(nil, nil)
+	a.SeedYggdrasilKey = strings.Repeat("ab", 32)
+
+	_, cmd := a.Update(gandrSessionMsg{session: session, channels: nil, offline: false})
+	if cmd == nil {
+		t.Fatal("förväntade ett kommando efter sessionsstart")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("förväntade en batch av kommandon efter sessionsstart, fick %#v", cmd())
+	}
+	found := false
+	for _, c := range batch {
+		if _, ok := c().(seedConnectMsg); ok {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("seed-anslutningen kördes inte automatiskt när en seed-nyckel är konfigurerad")
+	}
+}
+
+func TestGandrSessionStartSkipsSeedConnectWithoutConfiguredSeed(t *testing.T) {
+	subsystem := gandr.NewAt(filepath.Join(t.TempDir(), "gandr", "identity.key"))
+	if err := subsystem.Create("password"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := subsystem.Connect("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	a := New(nil, nil)
+	a.SeedYggdrasilKey = ""
+
+	_, cmd := a.Update(gandrSessionMsg{session: session, channels: nil, offline: false})
+	if cmd == nil {
+		t.Fatal("förväntade fortfarande waitGandrIncoming/refreshGandrPeers")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		return // a single non-batch cmd cannot be a seed connect either
+	}
+	for _, c := range batch {
+		if _, ok := c().(seedConnectMsg); ok {
+			t.Fatal("seed-anslutning kördes trots att ingen seed är konfigurerad")
+		}
+	}
+}
+
+func TestGandrSessionStartSkipsSeedConnectWhenOffline(t *testing.T) {
+	subsystem := gandr.NewAt(filepath.Join(t.TempDir(), "gandr", "identity.key"))
+	if err := subsystem.Create("password"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := subsystem.Connect("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	a := New(nil, nil)
+	a.SeedYggdrasilKey = strings.Repeat("ab", 32)
+
+	_, cmd := a.Update(gandrSessionMsg{session: session, channels: nil, offline: true})
+	if cmd == nil {
+		t.Fatal("förväntade fortfarande waitGandrIncoming/refreshGandrPeers")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		return
+	}
+	for _, c := range batch {
+		if _, ok := c().(seedConnectMsg); ok {
+			t.Fatal("seed-anslutning kördes trots offline-läge (ingen gandrd att koppla via)")
+		}
 	}
 }
 
@@ -585,12 +711,92 @@ func TestRenderPoliceMapShowsLegendWithCategoryCounts(t *testing.T) {
 		{EventType: "Trafikkontroll", Latitude: &lat1, Longitude: &lon1},
 		{EventType: "Mord/dråp", Latitude: &lat2, Longitude: &lon2},
 	}
-	got := renderSwedenMap(events, 60, 16)
+	got := renderSwedenMap(events, 60, 16, -1)
 	if !strings.Contains(got, "TRAFIK") || !strings.Contains(got, "VÅLD") {
 		t.Fatalf("kartlegenden saknar kategorierna: %s", got)
 	}
 	if !strings.Contains(got, "2") {
 		t.Fatalf("kartlegenden visar inte antalet per kategori: %s", got)
+	}
+}
+
+func TestRenderPoliceWorkspacePlacesMapBesideListOnWideTerminals(t *testing.T) {
+	lat, lon := 59.33, 18.06
+	events := []external.ExternalEvent{{EventType: "Mord/dråp", Latitude: &lat, Longitude: &lon, LocationName: "Stockholm"}}
+	a := App{Events: events, Cursor: 0, Width: 140, Height: 40}
+	got := renderPoliceWorkspace(a)
+	lines := strings.Split(got, "\n")
+	found := false
+	for _, line := range lines {
+		if strings.Contains(line, "Stockholm") && (strings.ContainsRune(line, '▀') || strings.ContainsRune(line, '▄')) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("förväntade listan och kartan på samma rad på en bred terminal: %s", got)
+	}
+}
+
+func TestRenderPoliceWorkspaceStacksOnNarrowTerminals(t *testing.T) {
+	lat, lon := 59.33, 18.06
+	events := []external.ExternalEvent{{EventType: "Mord/dråp", Latitude: &lat, Longitude: &lon, LocationName: "Stockholm"}}
+	a := App{Events: events, Cursor: 0, Width: 70, Height: 40}
+	got := renderPoliceWorkspace(a)
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "Stockholm") && (strings.ContainsRune(line, '▀') || strings.ContainsRune(line, '▄')) {
+			t.Fatalf("väntade en staplad layout på en smal terminal, fick en kombinerad rad: %s", got)
+		}
+	}
+}
+
+func TestCheckProximityAlertsSkipsBaselineBatchButAlertsOnNewNearbyEvent(t *testing.T) {
+	stockholm := geo.Location{Latitude: 59.33, Longitude: 18.06}
+	lat, lon := 59.33, 18.06 // right on top of the user
+	a := App{AlertRadiusKM: 10, UserLocation: &stockholm}
+
+	nearby := external.ExternalEvent{Source: "polisen", ExternalID: "1", EventType: "Stöld", LocationName: "Stockholm", Latitude: &lat, Longitude: &lon}
+	a = a.checkProximityAlerts([]external.ExternalEvent{nearby})
+	if a.ActiveAlert != nil {
+		t.Fatal("den första händelsebatchen (startup-cachen) larmade trots att den bara ska sätta baslinjen")
+	}
+
+	fresh := external.ExternalEvent{Source: "polisen", ExternalID: "2", EventType: "Rån", LocationName: "Stockholm", Latitude: &lat, Longitude: &lon}
+	a = a.checkProximityAlerts([]external.ExternalEvent{nearby, fresh})
+	if a.ActiveAlert == nil || a.ActiveAlert.ExternalID != "2" {
+		t.Fatalf("förväntade larm för den nya händelsen inom radien, fick %+v", a.ActiveAlert)
+	}
+}
+
+func TestCheckProximityAlertsIgnoresEventsOutsideRadius(t *testing.T) {
+	stockholm := geo.Location{Latitude: 59.33, Longitude: 18.06}
+	lat, lon := 57.71, 11.97 // Göteborg — ~400km away
+	a := App{AlertRadiusKM: 10, UserLocation: &stockholm}
+
+	a = a.checkProximityAlerts([]external.ExternalEvent{{Source: "polisen", ExternalID: "1", Latitude: &lat, Longitude: &lon}})
+	far := external.ExternalEvent{Source: "polisen", ExternalID: "2", Latitude: &lat, Longitude: &lon}
+	a = a.checkProximityAlerts([]external.ExternalEvent{far})
+	if a.ActiveAlert != nil {
+		t.Fatalf("en händelse ~400km bort med en 10km-radie ska inte larma, fick %+v", a.ActiveAlert)
+	}
+}
+
+func TestCheckProximityAlertsIsNoopWithoutLocationOrRadius(t *testing.T) {
+	lat, lon := 59.33, 18.06
+	events := []external.ExternalEvent{{Source: "polisen", ExternalID: "1", Latitude: &lat, Longitude: &lon}}
+
+	a := App{}
+	a = a.checkProximityAlerts(events)
+	if a.AlertedEventIDs != nil || a.AlertBaseline {
+		t.Fatal("checkProximityAlerts ska inte göra något alls när larm inte är aktiverat")
+	}
+}
+
+func TestPressingAAcknowledgesActiveAlert(t *testing.T) {
+	a := App{ActiveAlert: &external.ExternalEvent{EventType: "Stöld"}}
+	updated, _ := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	got := updated.(App)
+	if got.ActiveAlert != nil {
+		t.Fatal("tryck på a kvitterade inte det aktiva larmet")
 	}
 }
 

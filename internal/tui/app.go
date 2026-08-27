@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -18,6 +19,7 @@ import (
 	"github.com/backflash-cli/backflash/internal/external/polisen"
 	"github.com/backflash-cli/backflash/internal/flashback"
 	"github.com/backflash-cli/backflash/internal/gandr"
+	"github.com/backflash-cli/backflash/internal/geo"
 	"github.com/backflash-cli/backflash/internal/mesh"
 	meshruntime "github.com/backflash-cli/backflash/internal/mesh/runtime"
 	"github.com/backflash-cli/backflash/internal/service"
@@ -110,6 +112,7 @@ type gandrPeersMsg struct {
 }
 
 type gandrContactMsg struct{ err error }
+type gandrConnectMsg struct{ err error }
 type gandrGroupMsg struct {
 	groups   []gandr.PrivateGroup
 	active   *[32]byte
@@ -120,6 +123,12 @@ type gandrGroupMsg struct {
 
 type meshTickMsg struct{}
 type gandrPeerTickMsg struct{}
+type userLocationMsg struct {
+	loc geo.Location
+	err error
+}
+type alertTickMsg struct{}
+type seedConnectMsg struct{ err error }
 type App struct {
 	Store       *store.Store
 	Client      *flashback.Client
@@ -137,18 +146,29 @@ type App struct {
 	// Cursor is the position inside the current view. ThreadCursor remains
 	// fixed while reading posts so the middle panel keeps the opened thread
 	// selected when j/k moves through the reader.
-	ThreadCursor       int
-	Status             string
-	Input              textinput.Model
-	SearchRemote       bool
-	Query              string
-	RemotePage         int
-	ForumPage          int
-	ReaderPage         int
-	ReaderMaxPage      int
-	Events             []external.ExternalEvent
-	EventDetail        *external.ExternalEvent
-	EventService       *service.ExternalEventsService
+	ThreadCursor  int
+	Status        string
+	Input         textinput.Model
+	SearchRemote  bool
+	Query         string
+	RemotePage    int
+	ForumPage     int
+	ReaderPage    int
+	ReaderMaxPage int
+	Events        []external.ExternalEvent
+	EventDetail   *external.ExternalEvent
+	EventService  *service.ExternalEventsService
+	// Proximity alarm: opt-in via BACKFLASH_ALERT_RADIUS_KM (see New). Off
+	// (AlertRadiusKM == 0) unless the user explicitly sets that env var,
+	// since resolving GeoClient means sending this machine's public IP to a
+	// third-party geolocation API.
+	AlertRadiusKM      float64
+	GeoClient          *geo.Client
+	UserLocation       *geo.Location
+	AlertBaseline      bool // true once the first event batch has been seen, so startup's cached history doesn't all alarm at once
+	AlertedEventIDs    map[string]bool
+	ActiveAlert        *external.ExternalEvent
+	ActiveAlertKM      float64
 	Dashboard          service.DashboardSnapshot
 	DashboardSvc       *service.DashboardService
 	Gandr              *gandr.Subsystem
@@ -174,12 +194,17 @@ type App struct {
 	GandrUnlockGroupID *[32]byte
 	GandrGroupMessages map[[32]byte][]gandr.PrivateGroupMessage
 	GandrRightCursor   int
-	MeshRuntime        *meshruntime.Runtime
-	MeshState          meshruntime.Snapshot
-	PaletteOpen        bool
-	PaletteCursor      int
-	PostViewport       viewport.Model
-	PostViewportReady  bool
+	// SeedYggdrasilKey is the well-known first-contact peer dialed
+	// automatically once a chat session comes online, so a new user never
+	// has to learn what a Yggdrasil key even is to end up talking to
+	// someone. See defaultSeedYggdrasilKey.
+	SeedYggdrasilKey  string
+	MeshRuntime       *meshruntime.Runtime
+	MeshState         meshruntime.Snapshot
+	PaletteOpen       bool
+	PaletteCursor     int
+	PostViewport      viewport.Model
+	PostViewportReady bool
 }
 
 // Palette: deliberately small and consistent — one color per meaning, reused
@@ -228,6 +253,18 @@ func highlightURLs(text string) string {
 // flat-root bug.
 const navigationSource = "flashback:navigation:v6-sitemap-parent-ancestors"
 
+// defaultSeedYggdrasilKey is BACKFLASH's own well-known chat seed: a gandrd
+// daemon run on the project's cache server with no job other than being a
+// first contact for new clients (see the Peering section in README.md). It
+// never sees message content and stores nothing identity-linkable — it's a
+// courier, not a host, same as any other node on the network.
+//
+// Empty until that daemon is actually deployed and its printed Yggdrasil
+// key (from its own startup log: "gandrd: yggdrasil node key: <hex>") is
+// pasted in here. Override for self-hosting or testing with
+// BACKFLASH_SEED_KEY; set it to "-" to disable auto-connect entirely.
+const defaultSeedYggdrasilKey = ""
+
 func New(s *store.Store, c *flashback.Client) App {
 	input := textinput.New()
 	input.Prompt = "> "
@@ -236,7 +273,22 @@ func New(s *store.Store, c *flashback.Client) App {
 	eventService := &service.ExternalEventsService{Store: s, Provider: eventClient, RefreshAfter: 2 * time.Minute, Now: time.Now}
 	meshConfig := mesh.Load()
 	dashboard := &service.DashboardService{Store: s, Now: time.Now, MeshConfigured: meshConfig.Enabled}
-	return App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1, ForumPage: 1, EventService: eventService, DashboardSvc: dashboard, Gandr: gandr.New(), MeshRuntime: meshruntime.New(meshConfig), PostViewport: viewport.New(20, 6)}
+	app := App{Store: s, Client: c, CurrentView: ViewOverview, Input: input, Status: "REDO · cache lokal", RemotePage: 1, ForumPage: 1, EventService: eventService, DashboardSvc: dashboard, Gandr: gandr.New(), MeshRuntime: meshruntime.New(meshConfig), PostViewport: viewport.New(20, 6)}
+	// Proximity alarm is opt-in: only resolve a location (and thus only ever
+	// contact the third-party geolocation API) when the user has explicitly
+	// set a radius via BACKFLASH_ALERT_RADIUS_KM.
+	if radius, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("BACKFLASH_ALERT_RADIUS_KM")), 64); err == nil && radius > 0 {
+		app.AlertRadiusKM = radius
+		app.GeoClient = geo.NewClient(nil)
+	}
+	app.SeedYggdrasilKey = defaultSeedYggdrasilKey
+	if override := strings.TrimSpace(os.Getenv("BACKFLASH_SEED_KEY")); override != "" {
+		app.SeedYggdrasilKey = override
+	}
+	if app.SeedYggdrasilKey == "-" {
+		app.SeedYggdrasilKey = ""
+	}
+	return app
 }
 
 func Splash(w io.Writer, width int) {
@@ -257,7 +309,11 @@ func Splash(w io.Writer, width int) {
 }
 
 func (a App) Init() tea.Cmd {
-	return tea.Batch(loadCachedEvents(a.EventService), loadDashboard(a.DashboardSvc), startMesh(a.MeshRuntime))
+	cmds := []tea.Cmd{loadCachedEvents(a.EventService), loadDashboard(a.DashboardSvc), startMesh(a.MeshRuntime)}
+	if a.AlertRadiusKM > 0 && a.GeoClient != nil {
+		cmds = append(cmds, locateUser(a.GeoClient), alertTick())
+	}
+	return tea.Batch(cmds...)
 }
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
@@ -324,6 +380,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.CurrentView == ViewExternalEvents {
 				a.EventDetail = m.detail
 			}
+			a = a.checkProximityAlerts(m.events)
 			if m.refresh {
 				return a, refreshEvents(a.EventService)
 			}
@@ -350,18 +407,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.GandrFailures++
 			}
 			if m.created {
-				a.Status = "GANDR · FEL · valvet kunde inte skapas"
+				a.Status = "E2E-CHATT · FEL · valvet kunde inte skapas"
 			} else {
-				a.Status = "GANDR · FEL · lösenordet kunde inte verifieras"
+				a.Status = "E2E-CHATT · FEL · lösenordet kunde inte verifieras"
 			}
 			if a.GandrFailures >= 3 {
 				a.GandrLockedUntil = time.Now().Add(10 * time.Second)
 				a.Input.Blur()
 				a.Input.SetValue("")
-				a.Status = "GANDR · för många fel · upplåsning pausad i 10 sekunder"
+				a.Status = "E2E-CHATT · för många fel · upplåsning pausad i 10 sekunder"
 			} else if !m.created {
 				a.Input.SetValue("")
-				a.Input.Placeholder = "Försök igen · GANDR-lösenord"
+				a.Input.Placeholder = "Försök igen · E2E-CHATT-lösenord"
 				a.Input.Focus()
 			}
 		} else {
@@ -370,12 +427,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.GandrLockedUntil = time.Time{}
 			a.Input.EchoMode = textinput.EchoNormal
 			a.Input.Placeholder = ""
-			a.Status = "GANDR · identiteten är upplåst lokalt"
+			a.Status = "E2E-CHATT · identiteten är upplåst lokalt"
+			playSound(soundConfirmation)
 			return a, connectGandr(a.Gandr)
 		}
 	case gandrSessionMsg:
 		if m.err != nil {
-			a.Status = "GANDR · daemon ej ansluten · starta gandrd separat"
+			a.Status = "E2E-CHATT · daemon ej ansluten · starta gandrd separat"
 			return a, nil
 		}
 		a.GandrSession = m.session
@@ -399,13 +457,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.offline {
-			a.Status = fmt.Sprintf("GANDR · lokal runtime · daemon ej ansluten · %d kanaler", len(m.channels))
+			a.Status = fmt.Sprintf("E2E-CHATT · lokal runtime · daemon ej ansluten · %d kanaler", len(m.channels))
 		} else if m.session.Online() {
-			a.Status = fmt.Sprintf("GANDR · nätverk ansluten · %d kanaler", len(m.channels))
+			a.Status = fmt.Sprintf("E2E-CHATT · nätverk ansluten · %d kanaler", len(m.channels))
 		} else {
-			a.Status = fmt.Sprintf("GANDR · lokal runtime · %d kanaler", len(m.channels))
+			a.Status = fmt.Sprintf("E2E-CHATT · lokal runtime · %d kanaler", len(m.channels))
 		}
-		return a, tea.Batch(waitGandrIncoming(m.session), refreshGandrPeers(m.session))
+		cmds := []tea.Cmd{waitGandrIncoming(m.session), refreshGandrPeers(m.session)}
+		// Auto-dial the well-known seed so a brand new user ends up able to
+		// talk to someone without ever learning what a Yggdrasil key is.
+		// Skipped entirely offline (no daemon to dial through) or when no
+		// seed is configured.
+		if !m.offline && a.SeedYggdrasilKey != "" {
+			cmds = append(cmds, connectSeed(m.session, a.SeedYggdrasilKey))
+		}
+		return a, tea.Batch(cmds...)
 	case gandrIncomingMsg:
 		if a.GandrSession != nil {
 			_ = a.GandrSession.SaveMessage(gandr.ChatMessage{
@@ -418,6 +484,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.GandrMessages = make(map[[32]byte][]gandr.Message)
 		}
 		appendGandrMessage(a.GandrMessages, m.message)
+		if !m.message.Local {
+			playSound(soundIncomingMessage)
+		}
 		if a.GandrSession != nil {
 			return a, waitGandrIncoming(a.GandrSession)
 		}
@@ -434,15 +503,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case gandrContactMsg:
 		if m.err != nil {
-			a.Status = "GANDR · användaren kunde inte läggas till · " + m.err.Error()
+			a.Status = "E2E-CHATT · användaren kunde inte läggas till · " + m.err.Error()
 		} else if a.GandrSession != nil {
 			a.GandrContacts, _ = a.GandrSession.Contacts()
 			a.GandrAddMode = false
-			a.Status = "GANDR · användaren sparad lokalt"
+			a.Status = "E2E-CHATT · användaren sparad lokalt"
+			playSound(soundContactAdded)
+		}
+	case gandrConnectMsg:
+		if m.err != nil {
+			a.Status = "E2E-CHATT · anslutning misslyckades · " + m.err.Error()
+		} else {
+			a.Status = "E2E-CHATT · federationsförsök startat · väntar på handskakning"
 		}
 	case gandrGroupMsg:
 		if m.err != nil {
-			a.Status = "GANDR · privat grupp · " + m.err.Error()
+			a.Status = "E2E-CHATT · privat grupp · " + m.err.Error()
 		} else {
 			a.GandrGroups = m.groups
 			a.GandrActiveGroup = m.active
@@ -457,36 +533,36 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.GandrGroupMessages[*m.active] = m.messages
 			}
 			if m.invite != "" {
-				a.Status = "GANDR · inbjudan (delas som lösenordet, inte publikt): " + m.invite
+				a.Status = "E2E-CHATT · inbjudan (delas som lösenordet, inte publikt): " + m.invite
 			} else {
-				a.Status = "GANDR · privat grupp · krypterad lokalt"
+				a.Status = "E2E-CHATT · privat grupp · krypterad lokalt"
 			}
 		}
 	case gandrChannelsMsg:
 		if m.err != nil {
-			a.Status = "GANDR · kanalåtgärden misslyckades · " + m.err.Error()
+			a.Status = "E2E-CHATT · kanalåtgärden misslyckades · " + m.err.Error()
 		} else {
 			a.GandrChannels = m.channels
 			a.Cursor = min(a.Cursor, max(0, len(a.GandrChannels)-1))
-			a.Status = fmt.Sprintf("GANDR · %d kanaler", len(m.channels))
+			a.Status = fmt.Sprintf("E2E-CHATT · %d kanaler", len(m.channels))
 		}
 	case gandrStatusMsg:
 		if m.err != nil {
-			a.Status = "GANDR · blockering misslyckades · " + m.err.Error()
+			a.Status = "E2E-CHATT · blockering misslyckades · " + m.err.Error()
 		} else {
-			a.Status = "GANDR · kontakt blockerad lokalt"
+			a.Status = "E2E-CHATT · kontakt blockerad lokalt"
 		}
 	case gandrInvitationMsg:
 		if m.err != nil {
-			a.Status = "GANDR · inbjudan misslyckades · " + m.err.Error()
+			a.Status = "E2E-CHATT · inbjudan misslyckades · " + m.err.Error()
 		} else if m.token != "" {
-			a.Status = "GANDR · kopiera denna inbjudan: " + m.token
+			a.Status = "E2E-CHATT · kopiera denna inbjudan: " + m.token
 		} else {
-			a.Status = "GANDR · kontakt tillagd via inbjudan"
+			a.Status = "E2E-CHATT · kontakt tillagd via inbjudan"
 		}
 	case gandrDeleteMsg:
 		if m.err != nil {
-			a.Status = "GANDR · radering misslyckades · " + m.err.Error()
+			a.Status = "E2E-CHATT · radering misslyckades · " + m.err.Error()
 		} else {
 			a.GandrDeleteConfirm = false
 			if a.GandrRecreate {
@@ -494,20 +570,49 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.GandrCreating = true
 				a.GandrConfirming = false
 				a.Input.EchoMode = textinput.EchoPassword
-				a.Input.Placeholder = "Nytt GANDR-lösenord"
+				a.Input.Placeholder = "Nytt E2E-CHATT-lösenord"
 				a.Input.Focus()
-				a.Status = "GANDR · gamla valvet raderat · skapa nytt valv"
+				a.Status = "E2E-CHATT · gamla valvet raderat · skapa nytt valv"
 			} else {
-				a.Status = "GANDR · valv och privata data raderade"
+				a.Status = "E2E-CHATT · valv och privata data raderade"
 			}
 		}
 	case meshTickMsg:
 		if a.MeshRuntime == nil {
 			return a, nil
 		}
+		previousPeers := a.MeshState.Peers
 		a.MeshState = a.MeshRuntime.Snapshot()
 		a.applyMeshSnapshot(a.MeshState)
+		if a.MeshState.Peers > previousPeers {
+			playSound(soundPeerConnected)
+		}
 		return a, meshTick()
+	case userLocationMsg:
+		if m.err != nil {
+			// Best-effort: leave UserLocation nil so alertTick just keeps
+			// polling without ever being able to trigger an alarm, rather
+			// than treating a flaky geolocation API as a fatal error.
+			a.Status = "LARM · plats kunde inte slås upp · " + m.err.Error()
+			return a, nil
+		}
+		loc := m.loc
+		a.UserLocation = &loc
+		return a, nil
+	case alertTickMsg:
+		if a.EventService != nil && a.EventService.Stale(polisen.Source) {
+			return a, tea.Batch(refreshEvents(a.EventService), alertTick())
+		}
+		return a, alertTick()
+	case seedConnectMsg:
+		// Quiet by design: the user never asked for this connection
+		// attempt, so a failure (seed offline, no network yet) shouldn't
+		// read as something they need to fix. Success is worth a nod since
+		// it's the whole point of "simple as fuck" onboarding.
+		if m.err == nil {
+			a.Status = "E2E-CHATT · ansluten till publik seed"
+		}
+		return a, nil
 	case tea.KeyMsg:
 		if a.PaletteOpen {
 			switch m.String() {
@@ -549,7 +654,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.Input.SetValue("")
 					if a.GandrDeleteConfirm {
 						if q != "RADERA" {
-							a.Status = "GANDR · radering avbruten"
+							a.Status = "E2E-CHATT · radering avbruten"
 							return a, nil
 						}
 						a.Input.Blur()
@@ -558,28 +663,28 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return a, deleteGandr(a.Gandr)
 					}
 					if time.Now().Before(a.GandrLockedUntil) {
-						a.Status = fmt.Sprintf("GANDR · upplåsning pausad · %s kvar", time.Until(a.GandrLockedUntil).Round(time.Second))
+						a.Status = fmt.Sprintf("E2E-CHATT · upplåsning pausad · %s kvar", time.Until(a.GandrLockedUntil).Round(time.Second))
 						a.Input.Blur()
 						return a, nil
 					}
 					if a.GandrCreating {
 						if !a.GandrConfirming {
 							if raw == "" {
-								a.Status = "GANDR · lösenordet får inte vara tomt"
+								a.Status = "E2E-CHATT · lösenordet får inte vara tomt"
 								a.Input.Focus()
 								return a, nil
 							}
 							a.GandrPassphrase = raw
 							a.GandrConfirming = true
-							a.Input.Placeholder = "Upprepa GANDR-lösenordet"
+							a.Input.Placeholder = "Upprepa E2E-CHATT-lösenordet"
 							a.Input.Focus()
 							return a, nil
 						}
 						if raw != a.GandrPassphrase {
 							a.GandrPassphrase = ""
 							a.GandrConfirming = false
-							a.Input.Placeholder = "Nytt GANDR-lösenord"
-							a.Status = "GANDR · lösenorden matchar inte"
+							a.Input.Placeholder = "Nytt E2E-CHATT-lösenord"
+							a.Status = "E2E-CHATT · lösenorden matchar inte"
 							a.Input.Focus()
 							return a, nil
 						}
@@ -614,6 +719,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					if strings.HasPrefix(q, "/grupp") {
 						return a, gandrGroupCommand(a.GandrSession, a.GandrActiveGroup, q)
+					}
+					if strings.HasPrefix(q, "/connect ") {
+						return a, connectGandrPeer(a.GandrSession, strings.TrimSpace(strings.TrimPrefix(q, "/connect ")))
 					}
 					if strings.HasPrefix(q, "/join ") {
 						return a, gandrJoin(a.GandrSession, strings.TrimSpace(strings.TrimPrefix(q, "/join ")))
@@ -706,10 +814,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.Input.SetValue("")
 			a.Input.EchoMode = textinput.EchoPassword
 			if time.Now().Before(a.GandrLockedUntil) {
-				a.Status = fmt.Sprintf("GANDR · upplåsning pausad · %s kvar", time.Until(a.GandrLockedUntil).Round(time.Second))
+				a.Status = fmt.Sprintf("E2E-CHATT · upplåsning pausad · %s kvar", time.Until(a.GandrLockedUntil).Round(time.Second))
 				a.Input.Placeholder = "Försök igen senare"
 			} else if a.Gandr != nil && a.Gandr.HasVault() {
-				a.Input.Placeholder = "GANDR-lösenord"
+				a.Input.Placeholder = "E2E-CHATT-lösenord"
 				a.Input.Focus()
 			} else {
 				a.Input.Placeholder = ""
@@ -720,7 +828,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.GandrCreating, a.GandrConfirming, a.GandrPassphrase = true, false, ""
 				a.Input.SetValue("")
 				a.Input.EchoMode = textinput.EchoPassword
-				a.Input.Placeholder = "Nytt GANDR-lösenord"
+				a.Input.Placeholder = "Nytt E2E-CHATT-lösenord"
 				a.Input.Focus()
 			}
 			return a, nil
@@ -751,7 +859,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// discoverable without knowing the slash command exists.
 				if a.GandrActiveGroup != nil {
 					a.GandrActiveGroup = nil
-					a.Status = "GANDR · lämnade den privata gruppen"
+					a.Status = "E2E-CHATT · lämnade den privata gruppen"
 				}
 				return a, nil
 			}
@@ -800,6 +908,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.Input.EchoMode = textinput.EchoNormal
 				a.Input.Placeholder = "publik nyckel + namn"
 				a.Input.Focus()
+				return a, nil
+			}
+			if a.ActiveAlert != nil {
+				a.ActiveAlert = nil
 				return a, nil
 			}
 		case "/":
@@ -1160,13 +1272,19 @@ func (a App) View() string {
 	defer finish()
 	var b strings.Builder
 	if a.CurrentView == ViewGandr || a.CurrentView == ViewGandrChat {
-		b.WriteString(titleStyle.Render("ᚷ GANDR") + "  " + metadata.Render("· PRIVAT NÄTVERK"))
+		b.WriteString(titleStyle.Render("BACKFLASH E2E-CHATT") + "  " + metadata.Render("· PRIVAT NÄTVERK"))
 	} else {
 		b.WriteString(brand.Render("BACKFLASH // DISKURS-NOC"))
 	}
 	// Keep the shell compact: one breathing line below the header and one
 	// above the footer is enough on short terminals.
 	b.WriteString("\n")
+	// The proximity alarm banner shows regardless of which view is active
+	// (a nearby event matters just as much while reading a thread as while
+	// on the police page) and stays until acknowledged with "a".
+	if a.ActiveAlert != nil {
+		b.WriteString(renderProximityAlertBanner(*a.ActiveAlert, a.ActiveAlertKM))
+	}
 	switch a.CurrentView {
 	case ViewOverview:
 		b.WriteString(renderDashboard(a))
@@ -1202,21 +1320,7 @@ func (a App) View() string {
 	case ViewExternalEvents:
 		b.WriteString(viewHeading("POLISHÄNDELSER", "POLISEN · PUBLIK KÄLLA"))
 		b.WriteString("\n\n")
-		// Reserve a fixed overhead for headers/legend/footer and give the
-		// map the rest of the terminal height (capped so it doesn't crowd
-		// out the event list on very tall terminals). Sweden's aspect ratio
-		// means more rows also means a proportionally wider, more detailed
-		// silhouette — see renderSwedenMap's own width derivation.
-		mapRows := max(14, min(44, a.Height-24))
-		b.WriteString(renderSwedenMap(a.Events, a.Width-4, mapRows))
-		b.WriteString("\n\n")
-		rows := 12
-		if a.Height > 0 && a.Height-(mapRows+9) > rows {
-			rows = a.Height - (mapRows + 9)
-		}
-		b.WriteString(titleStyle.Render(fmt.Sprintf("SENASTE HÄNDELSER · %d AV %d", minInt(rows, len(a.Events)), len(a.Events))))
-		b.WriteString("\n")
-		b.WriteString(renderEventWindow(a.Events, a.Cursor, rows))
+		b.WriteString(renderPoliceWorkspace(a))
 		if a.EventDetail != nil {
 			b.WriteString("\n\n" + renderEventDetail(*a.EventDetail))
 		}
@@ -1224,7 +1328,7 @@ func (a App) View() string {
 		b.WriteString(viewHeading("CACHE-MESH", "BACKFLASH · PUBLIK CACHE"))
 		b.WriteString(renderMeshDetail(a.MeshState))
 	case ViewGandr:
-		b.WriteString(viewHeading("ᚷ GANDR", "SEPARAT PRIVAT SUBSYSTEM"))
+		b.WriteString(viewHeading("BACKFLASH E2E-CHATT", "KRYPTERAD CHATT · PETNAMN · YGGDRASIL"))
 		summary := gandr.Summary{State: gandr.Locked}
 		if a.Gandr != nil {
 			summary = a.Gandr.Summary()
@@ -1250,7 +1354,7 @@ func (a App) View() string {
 					b.WriteString("\n\nNytt valv · ange ett lösenord och tryck Enter.")
 				}
 			} else {
-				b.WriteString("\n\nInget GANDR-valv finns ännu.")
+				b.WriteString("\n\nInget E2E-CHATT-valv finns ännu.")
 				b.WriteString("\nTryck c för att skapa ett nytt valv, eller q för att gå tillbaka.")
 			}
 		case gandr.UnlockErr:
@@ -1261,19 +1365,19 @@ func (a App) View() string {
 				b.WriteString("\nTryck Enter för att öppna meddelanden och kanaler.")
 			} else {
 				b.WriteString("\n\nIdentiteten är dekrypterad i minnet.")
-				b.WriteString("\nGANDR-daemon är inte ansluten ännu.")
+				b.WriteString("\nE2E-CHATT-daemon är inte ansluten ännu.")
 			}
 		}
 		if a.GandrDeleteConfirm {
 			if a.GandrRecreate {
-				b.WriteString("\n\n" + critical.Render("VARNING: gamla GANDR-identiteten och client.db raderas."))
+				b.WriteString("\n\n" + critical.Render("VARNING: gamla E2E-CHATT-identiteten och client.db raderas."))
 				b.WriteString("\nDet går inte att återställa ett bortglömt lösenord. Skriv RADERA för nytt valv.")
 			} else {
-				b.WriteString("\n\n" + critical.Render("VARNING: detta raderar GANDR-identiteten och den privata client.db."))
+				b.WriteString("\n\n" + critical.Render("VARNING: detta raderar E2E-CHATT-identiteten och den privata client.db."))
 				b.WriteString("\nSkriv RADERA och tryck Enter för att fortsätta.")
 			}
 		}
-		b.WriteString("\n\n" + muted.Render("Gandr-identitet, privat databas och petnames hålls separerade från BACKFLASH."))
+		b.WriteString("\n\n" + muted.Render("E2E-CHATT-identitet, privat databas och petnames hålls separerade från BACKFLASH."))
 	case ViewGandrChat:
 		b.WriteString(renderGandrChat(a))
 	}
@@ -1289,7 +1393,7 @@ func (a App) View() string {
 	if a.CurrentView == ViewGandr || a.CurrentView == ViewGandrChat {
 		b.WriteString("\n" + muted.Render("j/k flytta · Enter öppna · / kommando · Esc lämna fält · x radera valv · n radera + skapa nytt · q tillbaka"))
 	} else {
-		b.WriteString("\n" + muted.Render("j/k · Enter · ") + accent.Render("F5") + muted.Render(" uppdatera · ") + accent.Render("f") + muted.Render(" forum · ") + accent.Render("/") + muted.Render(" fjärr · ") + accent.Render("Ctrl+F") + muted.Render(" lokalt · ") + accent.Render("p") + muted.Render(" polis · ") + accent.Render("m") + muted.Render(" mesh · ") + accent.Render("g") + muted.Render(" Gandr · ") + accent.Render("h") + muted.Render(" hem · q tillbaka"))
+		b.WriteString("\n" + muted.Render("j/k · Enter · ") + accent.Render("F5") + muted.Render(" uppdatera · ") + accent.Render("f") + muted.Render(" forum · ") + accent.Render("/") + muted.Render(" fjärr · ") + accent.Render("Ctrl+F") + muted.Render(" lokalt · ") + accent.Render("p") + muted.Render(" polis · ") + accent.Render("m") + muted.Render(" mesh · ") + accent.Render("g") + muted.Render(" chatt · ") + accent.Render("h") + muted.Render(" hem · q tillbaka"))
 	}
 	return b.String()
 }
@@ -1307,7 +1411,7 @@ var paletteItems = []paletteItem{
 	{Key: "ctrl+f", Title: "Lokalsök", Hint: "sök i sparat innehåll"},
 	{Key: "p", Title: "Polishändelser", Hint: "publika händelser och karta"},
 	{Key: "m", Title: "Cache-mesh", Hint: "status och peer-cache"},
-	{Key: "g", Title: "GANDR", Hint: "separat privat subsystem"},
+	{Key: "g", Title: "E2E-chatt", Hint: "krypterad chatt · yggdrasil"},
 }
 
 func renderPalette(a App) string {
@@ -1381,7 +1485,7 @@ func (a App) runPaletteItem() (tea.Model, tea.Cmd) {
 		a.Input.SetValue("")
 		a.Input.EchoMode = textinput.EchoPassword
 		if a.Gandr != nil && a.Gandr.HasVault() {
-			a.Input.Placeholder = "GANDR-lösenord"
+			a.Input.Placeholder = "E2E-CHATT-lösenord"
 			a.Input.Focus()
 		}
 		return a, nil
@@ -1463,7 +1567,7 @@ func gandrSidebarRows(a App, sidebarWidth int) ([]string, []gandrSidebarAction) 
 		gandrSidebarAction{Kind: gandrActionCreateGroup},
 	)
 	if a.Gandr != nil && a.Gandr.HasVault() {
-		lines = append(lines, critical.Render("[!] radera GANDR-valv"))
+		lines = append(lines, critical.Render("[!] radera E2E-CHATT-valv"))
 		actions = append(actions, gandrSidebarAction{Kind: gandrActionDeleteVault})
 	}
 	if len(a.GandrGroups) > 0 {
@@ -1600,9 +1704,9 @@ func renderGandrChat(a App) string {
 		}
 		members.WriteString("\n" + muted.Render("a lägg till · x blockera"))
 		memberView := gandrPanel(members.String(), memberWidth)
-		return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView, memberView) + "\n\n" + muted.Render("j/k kanal · ↑/↓ användare · Enter skriv · a lägg till · /invite ·"+gandrGroupHint(a)+" x blockera · q tillbaka")
+		return viewHeading("BACKFLASH E2E-CHATT · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView, memberView) + "\n\n" + muted.Render("j/k kanal · ↑/↓ användare · Enter skriv · a lägg till · /invite · /connect ·"+gandrGroupHint(a)+" x blockera · q tillbaka")
 	}
-	return viewHeading("ᚷ GANDR · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView) + "\n\n" + muted.Render("j/k kanal · Enter skriv · /invite ·"+gandrGroupHint(a)+" q tillbaka")
+	return viewHeading("BACKFLASH E2E-CHATT · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView) + "\n\n" + muted.Render("j/k kanal · Enter skriv · /invite · /connect ·"+gandrGroupHint(a)+" q tillbaka")
 }
 
 func gandrPanel(content string, width int) string {
@@ -1986,7 +2090,59 @@ func renderEvents(xs []external.ExternalEvent, c int) string {
 	return renderEventWindow(xs, c, len(xs))
 }
 
+// renderPoliceWorkspace lays out the police event list and the Sweden map.
+// On wide terminals they sit side by side, list on the left and map on the
+// right, with the map's dot for the currently selected event highlighted
+// (see renderSwedenMap's highlight param) so the list cursor and its map
+// position stay visibly linked. Narrow terminals fall back to the map
+// stacked above the list, since there isn't room for both columns without
+// truncating event text down to nothing.
+func renderPoliceWorkspace(a App) string {
+	if a.Width < 90 {
+		mapRows := max(14, min(44, a.Height-24))
+		rows := 12
+		if a.Height > 0 && a.Height-(mapRows+9) > rows {
+			rows = a.Height - (mapRows + 9)
+		}
+		var b strings.Builder
+		b.WriteString(renderSwedenMap(a.Events, a.Width-4, mapRows, a.Cursor))
+		b.WriteString("\n\n")
+		b.WriteString(titleStyle.Render(fmt.Sprintf("SENASTE HÄNDELSER · %d AV %d", minInt(rows, len(a.Events)), len(a.Events))))
+		b.WriteString("\n")
+		b.WriteString(renderEventWindow(a.Events, a.Cursor, rows))
+		return b.String()
+	}
+
+	listWidth := a.Width * 2 / 5
+	listWidth = max(38, min(58, listWidth))
+	mapWidth := a.Width - listWidth - 7
+	if mapWidth < 24 {
+		mapWidth = 24
+	}
+	mapRows := max(14, min(44, a.Height-13))
+	listRows := mapRows + 2
+	if a.Height > 0 {
+		listRows = max(6, min(listRows, a.Height-8))
+	}
+
+	var list strings.Builder
+	list.WriteString(titleStyle.Render(clip(fmt.Sprintf("SENASTE HÄNDELSER · %d AV %d", minInt(listRows, len(a.Events)), len(a.Events)), listWidth)))
+	list.WriteString("\n")
+	list.WriteString(renderEventWindowWidth(a.Events, a.Cursor, listRows, listWidth))
+
+	mapBlock := renderSwedenMap(a.Events, mapWidth, mapRows, a.Cursor)
+	return lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(listWidth).Render(list.String()), "   ", mapBlock)
+}
+
 func renderEventWindow(xs []external.ExternalEvent, c, maxRows int) string {
+	return renderEventWindowWidth(xs, c, maxRows, 0)
+}
+
+// renderEventWindowWidth is renderEventWindow with each row clipped to a
+// fixed width, for placement in a narrower column (e.g. beside the map)
+// where an unclipped line could wrap and break the layout. width <= 0
+// leaves rows unclipped.
+func renderEventWindowWidth(xs []external.ExternalEvent, c, maxRows, width int) string {
 	var b strings.Builder
 	if len(xs) == 0 {
 		return "Inga sparade polishändelser."
@@ -2022,7 +2178,11 @@ func renderEventWindow(xs []external.ExternalEvent, c, maxRows int) string {
 		if i == c {
 			text = selected.Render(text)
 		}
-		b.WriteString(policeCategoryGlyph(e.EventType) + " " + text + "\n")
+		line := policeCategoryGlyph(e.EventType) + " " + text
+		if width > 0 {
+			line = clip(line, width)
+		}
+		b.WriteString(line + "\n")
 	}
 	if end < len(xs) {
 		b.WriteString(muted.Render("↓ fler senare") + "\n")
@@ -2061,6 +2221,14 @@ func renderEventDetail(e external.ExternalEvent) string {
 		b.WriteString("\n\nKÄLLA      " + e.URL)
 	}
 	return b.String()
+}
+
+// renderProximityAlertBanner renders the persistent "a police event just
+// showed up near you" banner shown at the top of every view until
+// acknowledged (see the "a" key handler in Update).
+func renderProximityAlertBanner(e external.ExternalEvent, km float64) string {
+	text := fmt.Sprintf("⚠ LARM · %s · %s · %.1f km bort · tryck a för att kvittera", e.EventType, e.LocationName, km)
+	return critical.Render(text) + "\n\n"
 }
 
 // policeCategories buckets Polisen's free-text event types (there is no
@@ -2150,7 +2318,7 @@ func renderDashboard(a App) string {
 				fmt.Sprintf("Objekt      %d", d.MeshObjects),
 				fmt.Sprintf("RX/TX       %s / %s", bytesUint(d.MeshRX), bytesUint(d.MeshTX)),
 			}, columnWidth),
-			renderPanel("GANDR", gandrDashboardLines(a), columnWidth),
+			renderPanel("E2E-CHATT", gandrDashboardLines(a), columnWidth),
 		))
 		b.WriteString("\n\n")
 		eventLines := []string{"Inga sparade polishändelser."}
@@ -2161,15 +2329,15 @@ func renderDashboard(a App) string {
 	} else if width >= 80 {
 		b.WriteString(fmt.Sprintf("LOKAL DATA\nForum %s · Trådar %s · Inlägg %s · DB %s\n\n", number(d.ForumCount), number(d.ThreadCount), number(d.PostCount), bytes(d.DBSize)))
 		b.WriteString(fmt.Sprintf("AKTIVITET\nInlägg / 60m %s · Aktiva trådar %s · Nya trådar %s\n\n", number(d.PostsLastHour), number(d.ActiveThreads), number(d.NewThreads)))
-		b.WriteString(fmt.Sprintf("STATUS\nDB REDO · Nätverk %s · Session %s · Synk %s\n\nCACHE-MESH %s · noder %d · fjärrpeers %d · delning %s · RX/TX %s / %s · GANDR ᚷ %s\n", d.Network, d.Session, d.Sync, d.Mesh, d.MeshPeers+1, d.MeshPeers, d.MeshSharing, bytesUint(d.MeshRX), bytesUint(d.MeshTX), gandrStateLabel(a)))
+		b.WriteString(fmt.Sprintf("STATUS\nDB REDO · Nätverk %s · Session %s · Synk %s\n\nCACHE-MESH %s · noder %d · fjärrpeers %d · delning %s · RX/TX %s / %s · E2E-CHATT %s\n", d.Network, d.Session, d.Sync, d.Mesh, d.MeshPeers+1, d.MeshPeers, d.MeshSharing, bytesUint(d.MeshRX), bytesUint(d.MeshTX), gandrStateLabel(a)))
 		b.WriteString("POLISHÄNDELSER\n" + renderEventSummary(a.Events))
 	} else {
 		b.WriteString("DATA\n")
 		b.WriteString(fmt.Sprintf("%s forum\n%s trådar\n%s inlägg\n\n", number(d.ForumCount), number(d.ThreadCount), number(d.PostCount)))
 		b.WriteString("AKTIVITET\n" + number(d.PostsLastHour) + " / 60m\n\n")
-		b.WriteString("MESH " + d.Mesh + "\nnoder " + number(d.MeshPeers+1) + " · fjärrpeers " + number(d.MeshPeers) + " · objekt " + number(d.MeshObjects) + "\nGANDR ᚷ " + gandrStateLabel(a))
+		b.WriteString("MESH " + d.Mesh + "\nnoder " + number(d.MeshPeers+1) + " · fjärrpeers " + number(d.MeshPeers) + " · objekt " + number(d.MeshObjects) + "\nE2E-CHATT " + gandrStateLabel(a))
 	}
-	b.WriteString("\n\n" + muted.Render("[f] Forum  [/] Sök  [p] Polis  [m] Mesh  [g] Gandr  [h] Hem"))
+	b.WriteString("\n\n" + muted.Render("[f] Forum  [/] Sök  [p] Polis  [m] Mesh  [g] Chatt  [h] Hem"))
 	return b.String()
 }
 
@@ -2377,7 +2545,7 @@ func startMesh(runtime *meshruntime.Runtime) tea.Cmd {
 func unlockGandr(subsystem *gandr.Subsystem, passphrase string) tea.Cmd {
 	return func() tea.Msg {
 		if subsystem == nil {
-			return gandrMsg{err: fmt.Errorf("GANDR-gränsen saknas")}
+			return gandrMsg{err: fmt.Errorf("E2E-CHATT-gränsen saknas")}
 		}
 		err := subsystem.Unlock(passphrase)
 		return gandrMsg{summary: subsystem.Summary(), err: err}
@@ -2387,7 +2555,7 @@ func unlockGandr(subsystem *gandr.Subsystem, passphrase string) tea.Cmd {
 func connectGandr(subsystem *gandr.Subsystem) tea.Cmd {
 	return func() tea.Msg {
 		if subsystem == nil {
-			return gandrSessionMsg{err: fmt.Errorf("GANDR-gränsen saknas")}
+			return gandrSessionMsg{err: fmt.Errorf("E2E-CHATT-gränsen saknas")}
 		}
 		socket := gandrSocketPath()
 		session, err := subsystem.Connect(socket)
@@ -2464,7 +2632,7 @@ func waitGandrIncoming(session *gandr.Session) tea.Cmd {
 		for {
 			env, ok := <-incoming
 			if !ok || env == nil {
-				return gandrSessionMsg{err: fmt.Errorf("GANDR-daemon kopplades från")}
+				return gandrSessionMsg{err: fmt.Errorf("E2E-CHATT-daemon kopplades från")}
 			}
 			message, err := gandr.DecodeChat(env)
 			if err == nil {
@@ -2506,10 +2674,43 @@ func gandrSend(session *gandr.Session, id [32]byte, content string) tea.Cmd {
 	}
 }
 
+// connectGandrPeer asks the local gandrd daemon to dial and federate with
+// another node directly, given the *Yggdrasil transport key* they shared
+// with you (their own gandrd prints it to stderr at startup as "gandrd:
+// yggdrasil node key: <hex>" — that's a different key from their GANDR
+// identity/contact pubkey). Both daemons just need to be reachable on the
+// wider Yggdrasil overlay, not on each other's local network.
+func connectGandrPeer(session *gandr.Session, yggKeyHex string) tea.Cmd {
+	return func() tea.Msg {
+		if session == nil {
+			return gandrConnectMsg{err: fmt.Errorf("E2E-CHATT-sessionen är inte aktiv")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return gandrConnectMsg{err: session.ConnectPeer(ctx, yggKeyHex)}
+	}
+}
+
+// connectSeed is connectGandrPeer's automatic counterpart: same underlying
+// dial, but fired by the app on every session start rather than by a user
+// typing /connect, so its result is reported separately (see seedConnectMsg
+// in Update) and stays quiet on failure instead of surfacing a scary error
+// for something the user never asked for.
+func connectSeed(session *gandr.Session, yggKeyHex string) tea.Cmd {
+	return func() tea.Msg {
+		if session == nil {
+			return seedConnectMsg{err: fmt.Errorf("E2E-CHATT-sessionen är inte aktiv")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return seedConnectMsg{err: session.ConnectPeer(ctx, yggKeyHex)}
+	}
+}
+
 func addGandrContact(session *gandr.Session, value string) tea.Cmd {
 	return func() tea.Msg {
 		if session == nil {
-			return gandrContactMsg{err: fmt.Errorf("GANDR-sessionen är inte aktiv")}
+			return gandrContactMsg{err: fmt.Errorf("E2E-CHATT-sessionen är inte aktiv")}
 		}
 		value = strings.TrimSpace(value)
 		parts := strings.Fields(value)
@@ -2723,7 +2924,7 @@ func closeGandrSession(a *App) {
 func createGandr(subsystem *gandr.Subsystem, passphrase string) tea.Cmd {
 	return func() tea.Msg {
 		if subsystem == nil {
-			return gandrMsg{err: fmt.Errorf("GANDR-gränsen saknas")}
+			return gandrMsg{err: fmt.Errorf("E2E-CHATT-gränsen saknas")}
 		}
 		err := subsystem.Create(passphrase)
 		return gandrMsg{summary: subsystem.Summary(), err: err, created: true}
@@ -2733,7 +2934,7 @@ func createGandr(subsystem *gandr.Subsystem, passphrase string) tea.Cmd {
 func deleteGandr(subsystem *gandr.Subsystem) tea.Cmd {
 	return func() tea.Msg {
 		if subsystem == nil {
-			return gandrDeleteMsg{err: fmt.Errorf("GANDR-gränsen saknas")}
+			return gandrDeleteMsg{err: fmt.Errorf("E2E-CHATT-gränsen saknas")}
 		}
 		return gandrDeleteMsg{err: subsystem.DeleteVault()}
 	}
@@ -2741,6 +2942,63 @@ func deleteGandr(subsystem *gandr.Subsystem) tea.Cmd {
 
 func meshTick() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return meshTickMsg{} })
+}
+
+// locateUser resolves the machine's approximate location once, at startup,
+// for the proximity alarm. It is only ever invoked when the user opted in
+// via BACKFLASH_ALERT_RADIUS_KM (see New) — this is the one place in the
+// app that contacts a third-party service with this machine's public IP.
+func locateUser(client *geo.Client) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		loc, err := client.Locate(ctx)
+		return userLocationMsg{loc: loc, err: err}
+	}
+}
+
+// alertTick drives the proximity-alarm poll independently of which view is
+// active (same pattern as meshTick), so a police event near the user still
+// rings the alarm while they're reading a thread rather than only while
+// they happen to have the police page open.
+func alertTick() tea.Cmd {
+	return tea.Tick(30*time.Second, func(time.Time) tea.Msg { return alertTickMsg{} })
+}
+
+// checkProximityAlerts compares a batch of police events against the
+// user's resolved location and rings the alarm for any event within
+// AlertRadiusKM that hasn't already been accounted for. The very first
+// batch just establishes the "already seen" baseline without alerting —
+// otherwise every event already sitting in the local cache from before
+// this run would alarm all at once the moment a location resolves.
+func (a App) checkProximityAlerts(events []external.ExternalEvent) App {
+	if a.AlertRadiusKM <= 0 || a.UserLocation == nil {
+		return a
+	}
+	if a.AlertedEventIDs == nil {
+		a.AlertedEventIDs = make(map[string]bool, len(events))
+	}
+	firstRun := !a.AlertBaseline
+	a.AlertBaseline = true
+	for i := range events {
+		e := events[i]
+		id := e.Source + ":" + e.ExternalID
+		if a.AlertedEventIDs[id] {
+			continue
+		}
+		a.AlertedEventIDs[id] = true
+		if firstRun || e.Latitude == nil || e.Longitude == nil {
+			continue
+		}
+		dist := geo.DistanceKM(*a.UserLocation, geo.Location{Latitude: *e.Latitude, Longitude: *e.Longitude})
+		if dist <= a.AlertRadiusKM {
+			a.ActiveAlert = &events[i]
+			a.ActiveAlertKM = dist
+			a.Status = fmt.Sprintf("LARM · %s · %.1f km bort", e.LocationName, dist)
+			playAlarm()
+		}
+	}
+	return a
 }
 
 func meshStateLabel(state meshruntime.State) string {
@@ -2782,7 +3040,7 @@ func renderMeshDetail(snapshot meshruntime.Snapshot) string {
 	if snapshot.LastError != "" {
 		b.WriteString("\nFEL         " + snapshot.LastError)
 	}
-	b.WriteString("\n\n" + muted.Render("Endast publika cacheobjekt. Ingen Gandr-identitet, cookie eller läshistorik delas."))
+	b.WriteString("\n\n" + muted.Render("Endast publika cacheobjekt. Ingen E2E-CHATT-identitet, cookie eller läshistorik delas."))
 	return b.String()
 }
 

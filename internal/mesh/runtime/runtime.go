@@ -83,11 +83,15 @@ func (r *Runtime) Start(parent context.Context) error {
 		r.setState(Disabled, nil)
 		return nil
 	}
-	if len(r.cfg.Peers) > 0 && len(r.cfg.PeerKey) != ed25519.PublicKeySize {
-		err := errors.New("mesh-peer är konfigurerad men peer_key saknas eller är inte 64 hextecken")
-		r.setState(Error, err)
-		return err
-	}
+	// PeerKey is unrelated to Peers: Peers are general Yggdrasil transport
+	// bootstrap links (needed just to reach the overlay at all, and
+	// legitimately configured with zero relation to BACKFLASH), while
+	// PeerKey names one specific BACKFLASH-cache node to sync content from
+	// — optional, and already handled gracefully downstream (ygg.Node's
+	// RequestContext/Publish return a plain error, not a crash, when it's
+	// unset). Requiring it just because Peers is non-empty broke every
+	// bootstrap/seed deployment, which by definition has no other
+	// BACKFLASH-cache node yet to designate as a sync target.
 	r.mu.RLock()
 	active := r.cancel != nil
 	r.mu.RUnlock()

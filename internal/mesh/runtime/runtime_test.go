@@ -27,6 +27,30 @@ func TestDisabledRuntimeDoesNotCreateIdentity(t *testing.T) {
 	}
 }
 
+// TestRuntimeStartsWithBootstrapPeersButNoPeerKey pins the exact deployment
+// this used to break: a seed/bootstrap node given general Yggdrasil
+// transport peers (needed just to reach the overlay) but no PeerKey (which
+// only matters for syncing content from one specific other BACKFLASH-cache
+// node — orthogonal, and optional). Start() must not reject this; the
+// downstream ygg.Node methods that actually need PeerKey already fail
+// gracefully per-call when it's unset.
+func TestRuntimeStartsWithBootstrapPeersButNoPeerKey(t *testing.T) {
+	cfg := mesh.Config{
+		Enabled:      true,
+		IdentityPath: filepath.Join(t.TempDir(), "identity.key"),
+		ObjectPath:   filepath.Join(t.TempDir(), "objects"),
+		Peers:        []string{"tcp://127.0.0.1:1"}, // registered for background dialing, never expected to connect
+	}
+	r := New(cfg)
+	if err := r.Start(context.Background()); err != nil {
+		t.Fatalf("Start() med Peers men utan PeerKey gav fel: %v", err)
+	}
+	defer r.Stop()
+	if r.State() != Running && r.State() != Degraded {
+		t.Fatalf("status blev %s, väntade RUNNING eller DEGRADED", r.State())
+	}
+}
+
 func TestRuntimeIdentityAndObjectsSurviveRestart(t *testing.T) {
 	identity := filepath.Join(t.TempDir(), "identity.key")
 	objects := filepath.Join(t.TempDir(), "objects")

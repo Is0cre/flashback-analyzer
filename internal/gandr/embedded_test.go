@@ -308,3 +308,114 @@ func TestPrivateGroupSharesAcrossTwoIndependentEmbeddedSessions(t *testing.T) {
 		t.Fatal("relayen fick aldrig pushen (bytt kanal-id mellan de två kontrollerna?)")
 	}
 }
+
+// TestEnsureDefaultChannelsResubscribesAfterReconnect pins the actual bug
+// behind "messages don't route": a fresh transport session always starts
+// with zero subscriptions, regardless of what channels are already known
+// from local storage. EnsureDefaultChannels used to return early once
+// channels existed locally, silently leaving every session after the
+// very first one subscribed to nothing — sends still worked, nothing was
+// ever received. This simulates exactly that: connect, join, close (an
+// app restart), reconnect with the same identity, and confirm a message
+// from someone else still arrives on the new connection.
+func TestEnsureDefaultChannelsResubscribesAfterReconnect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping full-stack test in -short mode")
+	}
+
+	hub := startRawDaemonPeer(t, []string{"tcp://127.0.0.1:0"})
+	hubKey := hex.EncodeToString(hub.transport.LocalAddr().YggKey)
+	hubAddr := "tcp://" + hub.transport.ListenAddrs()[0]
+
+	identityPath := filepath.Join(t.TempDir(), "identity.key")
+	first := NewAt(identityPath)
+	if err := first.Create("password"); err != nil {
+		t.Fatal(err)
+	}
+	firstSession, err := first.ConnectEmbedded(EmbeddedOptions{
+		SeedYggdrasilKey: hubKey,
+		BootstrapPeers:   []string{hubAddr},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := firstSession.EnsureDefaultChannels(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstSession.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the app restarting: a fresh Subsystem unlocking the exact
+	// same identity file, and a fresh embedded daemon with its own zero
+	// subscription state — the local DB already knows about the default
+	// channels from the first session, this connection does not.
+	second := NewAt(identityPath)
+	if err := second.Unlock("password"); err != nil {
+		t.Fatal(err)
+	}
+	secondSession, err := second.ConnectEmbedded(EmbeddedOptions{
+		SeedYggdrasilKey: hubKey,
+		BootstrapPeers:   []string{hubAddr},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondSession.Close()
+
+	channels, err := secondSession.EnsureDefaultChannels(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(channels) == 0 {
+		t.Fatal("channels should already have been known locally from the first session")
+	}
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		peers, err := secondSession.Peers(ctx)
+		if err == nil && len(peers) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second session never federated with the hub")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// The hub relaying a message from some other, unrelated user — this
+	// only reaches secondSession's Incoming() if EnsureDefaultChannels
+	// actually resubscribed on this fresh connection.
+	sender, err := gandridentity.Generate("annan-anvandare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := proto.EncodePayload(&proto.ChatPayload{ChannelID: channels[0].ID, Content: "message after a restart"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := proto.NewEnvelope(sender.PrivateKey, proto.MsgChat, channels[0].ID, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.daemon.HandleSend(env); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-secondSession.Incoming():
+		msg, err := DecodeChat(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if msg.Content != "message after a restart" {
+			t.Fatalf("fel innehåll: %q", msg.Content)
+		}
+	case <-ctx.Done():
+		t.Fatal("the reconnected session never received the message — EnsureDefaultChannels did not resubscribe")
+	}
+}

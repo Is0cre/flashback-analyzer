@@ -242,6 +242,19 @@ type Peer struct {
 
 var DefaultChannels = []string{"general", "support", "backflash", "offtopic"}
 
+// EnsureDefaultChannels makes sure the default channels exist in local
+// storage (joining any that don't yet) and — critically, on every call,
+// not just the first — (re)subscribes this session's transport to all of
+// them. Subscription state lives on the transport/daemon connection, not
+// in local storage: a brand new embedded daemon (or a brand new IPC
+// connection to an external one) always starts with zero subscriptions
+// regardless of what channels were already known locally from a previous
+// run. An earlier version of this function returned early once channels
+// existed locally, which meant every app restart after the very first
+// one silently left the fresh session subscribed to nothing — sends
+// still worked, nothing was ever received. That's the actual bug behind
+// "messages don't route": it wasn't the network, it was never asking to
+// be delivered anything in the first place.
 func (s *Session) EnsureDefaultChannels(ctx context.Context) ([]Channel, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("E2E-CHATT-sessionen är inte aktiv")
@@ -250,15 +263,20 @@ func (s *Session) EnsureDefaultChannels(ctx context.Context) ([]Channel, error) 
 	if err != nil {
 		return nil, err
 	}
-	if len(channels) > 0 {
-		return channels, nil
+	if len(channels) == 0 {
+		for _, name := range DefaultChannels {
+			if _, err := s.Join(ctx, name); err != nil {
+				return nil, err
+			}
+		}
+		return s.Channels()
 	}
-	for _, name := range DefaultChannels {
-		if _, err := s.Join(ctx, name); err != nil {
+	for _, channel := range channels {
+		if err := s.Subscribe(ctx, channel.ID); err != nil {
 			return nil, err
 		}
 	}
-	return s.Channels()
+	return channels, nil
 }
 
 func (s *Session) Contacts() ([]Contact, error) {

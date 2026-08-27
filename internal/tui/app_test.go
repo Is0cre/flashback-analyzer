@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/hex"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -401,6 +402,32 @@ func TestGandrSessionStartSkipsSeedConnectWhenOffline(t *testing.T) {
 		if _, ok := c().(seedConnectMsg); ok {
 			t.Fatal("seed-anslutning kördes trots offline-läge (ingen gandrd att koppla via)")
 		}
+	}
+}
+
+func TestOfflineFallbackSurfacesWhyTheEmbeddedDaemonFailed(t *testing.T) {
+	subsystem := gandr.NewAt(filepath.Join(t.TempDir(), "gandr", "identity.key"))
+	if err := subsystem.Create("password"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := subsystem.Connect("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	a := New(nil, nil)
+	got, _ := a.Update(gandrSessionMsg{
+		session:       session,
+		offline:       true,
+		offlineReason: errors.New("disk full, could not write objects"),
+	})
+	status := got.(App).Status
+	if !strings.Contains(status, "disk full, could not write objects") {
+		t.Fatalf("statusraden döljer den faktiska felorsaken: %q", status)
+	}
+	if strings.Contains(status, "starta gandrd separat") {
+		t.Fatalf("statusraden ger fortfarande föråldrade råd om en separat gandrd-process: %q", status)
 	}
 }
 

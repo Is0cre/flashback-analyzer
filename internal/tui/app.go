@@ -88,7 +88,13 @@ type gandrSessionMsg struct {
 	peers    []gandr.Peer
 	groups   []gandr.PrivateGroup
 	offline  bool
-	err      error
+	// offlineReason is why the embedded daemon itself failed to start,
+	// when offline is true — the actual cause used to be silently
+	// discarded (only "did it fail" was checked, never "why"), leaving
+	// no way to tell a real local error apart from simply nothing being
+	// reachable yet. See connectGandr.
+	offlineReason error
+	err           error
 }
 
 type gandrIncomingMsg struct {
@@ -455,7 +461,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case gandrSessionMsg:
 		if m.err != nil {
-			a.Status = "E2E-CHATT · daemon ej ansluten · starta gandrd separat"
+			// This is the last-resort path failing too (can't even open
+			// the local encrypted client.db) — genuinely rare. Show the
+			// actual reason instead of stale advice about a daemon that
+			// hasn't been a separate process since chat got embedded.
+			a.Status = "E2E-CHATT · kunde inte starta: " + m.err.Error()
 			return a, nil
 		}
 		a.GandrSession = m.session
@@ -479,7 +489,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.offline {
-			a.Status = fmt.Sprintf("E2E-CHATT · lokal runtime · daemon ej ansluten · %d kanaler", len(m.channels))
+			// "starta gandrd separat" was correct advice for the old
+			// architecture — irrelevant now that chat runs its own daemon
+			// in-process (ConnectEmbedded). Surface why THAT failed
+			// instead, since that's the thing actually worth knowing.
+			reason := "okänt fel"
+			if m.offlineReason != nil {
+				reason = m.offlineReason.Error()
+			}
+			a.Status = fmt.Sprintf("E2E-CHATT · lokal runtime · inbäddad daemon startade inte: %s · %d kanaler", reason, len(m.channels))
 		} else if m.session.Online() {
 			a.Status = fmt.Sprintf("E2E-CHATT · nätverk ansluten · %d kanaler", len(m.channels))
 		} else {
@@ -2687,6 +2705,7 @@ func connectGandr(subsystem *gandr.Subsystem, seedKey string, bootstrapPeers []s
 		// install or run a second background service just to chat.
 		session, err := subsystem.Connect(gandrSocketPath())
 		offline := false
+		var offlineReason error
 		if err != nil {
 			session, err = subsystem.ConnectEmbedded(gandr.EmbeddedOptions{
 				SeedYggdrasilKey: seedKey,
@@ -2694,11 +2713,20 @@ func connectGandr(subsystem *gandr.Subsystem, seedKey string, bootstrapPeers []s
 			})
 		}
 		if err != nil {
+			// Keep whichever error actually explains the fallback: this is
+			// specifically ConnectEmbedded's failure, not the (expected,
+			// uninteresting) "no external gandrd socket" one from the
+			// first attempt, and not whatever Connect("") below reports
+			// (which is never anything but "no client" by construction).
+			// This used to be discarded outright — the UI just said
+			// "offline" with no way to tell a real local failure (bad
+			// disk permissions, corrupt local state, ...) apart from
+			// there simply being no seed reachable yet.
+			offlineReason = err
 			// Last resort: keep the local encrypted chat usable even if
-			// the embedded daemon itself couldn't start (e.g. no usable
-			// Yggdrasil transport at all). The session is deliberately
-			// marked offline; sends are stored locally and are not
-			// presented as delivered over the network.
+			// the embedded daemon itself couldn't start. The session is
+			// deliberately marked offline; sends are stored locally and
+			// are not presented as delivered over the network.
 			session, err = subsystem.Connect("")
 			if err != nil {
 				return gandrSessionMsg{err: err}
@@ -2729,7 +2757,7 @@ func connectGandr(subsystem *gandr.Subsystem, seedKey string, bootstrapPeers []s
 		}
 		peers, _ := session.Peers(ctx)
 		groups, _ := session.PrivateGroups()
-		return gandrSessionMsg{session: session, channels: channels, peers: peers, groups: groups, offline: offline}
+		return gandrSessionMsg{session: session, channels: channels, peers: peers, groups: groups, offline: offline, offlineReason: offlineReason}
 	}
 }
 

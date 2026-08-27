@@ -574,7 +574,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.err != nil {
 			a.Status = "E2E-CHATT · inbjudan misslyckades · " + m.err.Error()
 		} else if m.token != "" {
-			a.Status = "E2E-CHATT · kopiera denna inbjudan: " + m.token
+			copyToClipboard(m.token)
+			a.Status = "E2E-CHATT · inbjudan kopierad till urklipp: " + m.token
 		} else {
 			a.Status = "E2E-CHATT · kontakt tillagd via inbjudan"
 		}

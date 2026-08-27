@@ -521,6 +521,68 @@ func TestGandrChatShowsUsersAndMeshPresence(t *testing.T) {
 	}
 }
 
+func TestGandrChatShowsWelcomeBannerAndPersistentInputBox(t *testing.T) {
+	a := New(nil, nil)
+	a.CurrentView = ViewGandrChat
+	a.Width = 120
+	a.GandrChannels = []gandr.Channel{{Name: "general"}}
+	view := a.View()
+	if !strings.Contains(view, "Välkommen till #general") {
+		t.Fatalf("kanalvyn saknar välkomstbanner: %q", view)
+	}
+	// The input box must render even though nothing focused it — that's
+	// the whole point of a persistent input area instead of one that
+	// only appears once you start typing.
+	if !strings.Contains(view, "Enter för att skriva") {
+		t.Fatalf("kanalvyn saknar det permanenta skrivfältet när inget är fokuserat: %q", view)
+	}
+}
+
+func TestGandrSenderStyleIsStableAndSelfIsDistinct(t *testing.T) {
+	var alice [32]byte
+	alice[0] = 0x11
+	first := gandrSenderStyle(alice, false)
+	second := gandrSenderStyle(alice, false)
+	if first.GetForeground() != second.GetForeground() {
+		t.Fatal("samma avsändare fick olika färg mellan två anrop — namnfärgen måste vara stabil")
+	}
+	self := gandrSenderStyle([32]byte{}, true)
+	if self.GetForeground() == first.GetForeground() {
+		t.Fatal("egna meddelanden fick samma färg som en annan avsändares hash-baserade färg av en slump — bör vara en fast, skild stil")
+	}
+}
+
+func TestPressingNPrefillsAddContactWithLastSpeakersKey(t *testing.T) {
+	var sender [32]byte
+	sender[0] = 0xAB
+	sender[1] = 0xCD
+	channel := gandr.Channel{Name: "general"}
+	channel.ID = gandr.ChannelID("general")
+
+	a := New(nil, nil)
+	a.CurrentView = ViewGandrChat
+	a.GandrChannels = []gandr.Channel{channel}
+	a.GandrMessages = map[[32]byte][]gandr.Message{
+		channel.ID: {
+			{Sender: [32]byte{}, Content: "mitt eget meddelande", Local: true},
+			{Sender: sender, Content: "hej där"},
+		},
+	}
+
+	updated, _ := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	got := updated.(App)
+	if !got.GandrAddMode {
+		t.Fatal("n-genvägen aktiverade inte lägg-till-läge")
+	}
+	wantPrefix := hex.EncodeToString(sender[:]) + " "
+	if got.Input.Value() != wantPrefix {
+		t.Fatalf("inmatningen förifylldes fel: got %q, want %q", got.Input.Value(), wantPrefix)
+	}
+	if !got.Input.Focused() {
+		t.Fatal("inmatningsfältet fokuserades inte")
+	}
+}
+
 func TestGandrPresenceMarkerIsColorCoded(t *testing.T) {
 	original := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)

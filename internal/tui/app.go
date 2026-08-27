@@ -862,6 +862,27 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.Input.Focus()
 				return a, nil
 			}
+			// Petname shortcut: name whoever spoke most recently in the
+			// current channel, instead of hunting down their hex pubkey
+			// to type into /add by hand. Pre-fills the input with the key
+			// already in place — just type a name and press Enter.
+			if a.CurrentView == ViewGandrChat && a.GandrActiveGroup == nil && len(a.GandrChannels) > 0 {
+				channel := a.GandrChannels[min(a.Cursor, len(a.GandrChannels)-1)]
+				messages := a.GandrMessages[channel.ID]
+				for i := len(messages) - 1; i >= 0; i-- {
+					sender := messages[i].Sender
+					if messages[i].Local || sender == ([32]byte{}) {
+						continue // that's you — nothing to name
+					}
+					a.GandrAddMode = true
+					a.Input.EchoMode = textinput.EchoNormal
+					a.Input.Placeholder = "publik nyckel + namn"
+					a.Input.SetValue(hex.EncodeToString(sender[:]) + " ")
+					a.Input.CursorEnd()
+					a.Input.Focus()
+					break
+				}
+			}
 			return a, nil
 		case "d":
 			if a.CurrentView == ViewGandr && a.Gandr != nil && a.Gandr.HasVault() {
@@ -1400,7 +1421,7 @@ func (a App) View() string {
 	case ViewGandrChat:
 		b.WriteString(renderGandrChat(a))
 	}
-	if a.Input.Focused() {
+	if a.Input.Focused() && a.CurrentView != ViewGandrChat {
 		b.WriteString("\n" + a.Input.View())
 	}
 	if a.Status != "" {
@@ -1409,9 +1430,9 @@ func (a App) View() string {
 	if a.PaletteOpen {
 		b.WriteString("\n" + renderPalette(a))
 	}
-	if a.CurrentView == ViewGandr || a.CurrentView == ViewGandrChat {
+	if a.CurrentView == ViewGandr {
 		b.WriteString("\n" + muted.Render("j/k flytta · Enter öppna · / kommando · Esc lämna fält · x radera valv · n radera + skapa nytt · q tillbaka"))
-	} else {
+	} else if a.CurrentView != ViewGandrChat {
 		b.WriteString("\n" + muted.Render("j/k · Enter · ") + accent.Render("F5") + muted.Render(" uppdatera · ") + accent.Render("f") + muted.Render(" forum · ") + accent.Render("/") + muted.Render(" fjärr · ") + accent.Render("Ctrl+F") + muted.Render(" lokalt · ") + accent.Render("p") + muted.Render(" polis · ") + accent.Render("m") + muted.Render(" mesh · ") + accent.Render("g") + muted.Render(" chatt · ") + accent.Render("h") + muted.Render(" hem · q tillbaka"))
 	}
 	return b.String()
@@ -1609,6 +1630,41 @@ func gandrSidebarRows(a App, sidebarWidth int) ([]string, []gandrSidebarAction) 
 	return lines, actions
 }
 
+// gandrSenderPalette assigns each chat participant a stable color derived
+// from their pubkey — the same trick most IRC/chat clients use so a name
+// reads consistently at a glance without parsing hex. Colors are chosen
+// distinct from every other meaning already assigned elsewhere in this
+// file (accent/warning/online/critical/brand/titleStyle), so a username
+// is never mistaken for a status or severity signal.
+var gandrSenderPalette = []string{"110", "150", "175", "182", "116", "223", "141", "108"}
+
+// gandrSenderStyle picks this sender's color. "du" (your own messages)
+// always gets the same fixed, distinct style rather than a palette color,
+// so your own lines stay instantly recognizable regardless of what your
+// own pubkey happens to hash to.
+func gandrSenderStyle(sender [32]byte, isSelf bool) lipgloss.Style {
+	if isSelf {
+		return strong
+	}
+	sum := 0
+	for _, b := range sender {
+		sum += int(b)
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(gandrSenderPalette[sum%len(gandrSenderPalette)]))
+}
+
+// gandrChatInputBox renders the message input area. Unlike the rest of
+// the app (where the shared input only appears once focused, e.g. mid
+// search), the chat input stays visible at a fixed position the whole
+// time — the layout shouldn't jump the moment you start typing, the way
+// a real chat client's input bar never does.
+func gandrChatInputBox(a App, width int) string {
+	if a.Input.Focused() {
+		return a.Input.View()
+	}
+	return muted.Render(truncate("› Enter för att skriva…", width))
+}
+
 func renderGandrChat(a App) string {
 	width := a.Width
 	if width < 60 {
@@ -1638,16 +1694,21 @@ func renderGandrChat(a App) string {
 		main.WriteString("\n" + metadata.Render(strings.Repeat("─", max(1, mainWidth-2))) + "\n")
 		messages := a.GandrGroupMessages[*a.GandrActiveGroup]
 		if len(messages) == 0 {
-			main.WriteString(muted.Render("Inga privata meddelanden ännu."))
+			main.WriteString(muted.Render(fmt.Sprintf("Välkommen till %s. Inga meddelanden ännu.", groupName)))
 		} else {
 			start := 0
 			if len(messages) > 18 {
 				start = len(messages) - 18
 			}
 			for _, message := range messages[start:] {
+				isSelf := message.Sender == ([32]byte{})
 				sender := fmt.Sprintf("~%x", message.Sender[:4])
+				if isSelf {
+					sender = "du"
+				}
+				style := gandrSenderStyle(message.Sender, isSelf)
 				stamp := time.Unix(0, message.At).Local().Format("15:04")
-				main.WriteString(metadata.Render(stamp) + " " + accent.Render(fmt.Sprintf("%-8s", sender)) + " " + message.Content + "\n")
+				main.WriteString(metadata.Render(stamp) + " " + style.Render(fmt.Sprintf("%-8s", sender)) + " " + message.Content + "\n")
 			}
 		}
 	} else if len(a.GandrChannels) == 0 {
@@ -1663,6 +1724,7 @@ func renderGandrChat(a App) string {
 			main.WriteString("  " + warning.Render("○ LOKAL"))
 		}
 		main.WriteString("\n" + metadata.Render(strings.Repeat("─", max(1, mainWidth-2))) + "\n")
+		main.WriteString(online.Render(fmt.Sprintf("Välkommen till #%s — meddelanden är krypterade och routas via Yggdrasil. Tryck n för att döpa den senaste avsändaren.", channel.Name)) + "\n")
 		messages := a.GandrMessages[channel.ID]
 		if len(messages) == 0 {
 			main.WriteString(muted.Render("Inga meddelanden ännu."))
@@ -1672,15 +1734,18 @@ func renderGandrChat(a App) string {
 				start = len(messages) - 18
 			}
 			for _, message := range messages[start:] {
+				isSelf := message.Local || message.Sender == ([32]byte{})
 				sender := fmt.Sprintf("~%x", message.Sender[:4])
-				if message.Local || message.Sender == ([32]byte{}) {
+				if isSelf {
 					sender = "du"
 				}
+				style := gandrSenderStyle(message.Sender, isSelf)
 				stamp := time.Unix(0, message.At).Local().Format("15:04")
-				main.WriteString(metadata.Render(stamp) + " " + accent.Render(fmt.Sprintf("%-8s", sender)) + " " + message.Content + "\n")
+				main.WriteString(metadata.Render(stamp) + " " + style.Render(fmt.Sprintf("%-8s", sender)) + " " + message.Content + "\n")
 			}
 		}
 	}
+	main.WriteString("\n" + gandrChatInputBox(a, mainWidth-2))
 
 	left := gandrPanel(sidebar.String(), sidebarWidth)
 	mainView := gandrPanel(main.String(), mainWidth)

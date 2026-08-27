@@ -15,10 +15,15 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/gandr-net/gandr/pkg/daemon"
 	"github.com/gandr-net/gandr/pkg/identity"
+	"github.com/gandr-net/gandr/pkg/ipc"
 	"github.com/gandr-net/gandr/pkg/network"
 	"github.com/gandr-net/gandr/pkg/store"
 )
+
+// userAgent is announced in federation handshakes.
+const userAgent = "gandrd/0.1.0"
 
 // Version is stamped by the build; see Makefile.
 var Version = "dev"
@@ -88,19 +93,48 @@ func run() error {
 		return fmt.Errorf("creating socket directory: %w", err)
 	}
 
-	daemon, err := NewDaemon(cfg, id, transport, objects)
+	defaultTrust, err := cfg.DefaultTrust()
 	if err != nil {
 		return err
 	}
+	seedKeys, err := cfg.SeedKeys()
+	if err != nil {
+		return err
+	}
+	d, err := daemon.New(daemon.Options{
+		UserAgent:      userAgent,
+		Capabilities:   cfg.Capabilities.Bitmask(),
+		Relay:          cfg.Capabilities.Relay,
+		MaxPeers:       cfg.Peering.MaxPeers,
+		DefaultTrust:   defaultTrust,
+		MaxMessageAge:  cfg.Limits.MaxMessageAge,
+		MaxPayloadSize: cfg.Limits.MaxPayloadSize,
+		RateLimitRPM:   int(cfg.Limits.RateLimitRPM),
+		Seeds:          seedKeys,
+	}, id, transport, objects)
+	if err != nil {
+		return err
+	}
+
+	// ipc.Listen needs the daemon as its Handler before the daemon has
+	// anywhere to push events — SetEventSink wires the two together once
+	// both exist, matching the daemon's own historical construction order.
+	srv, err := ipc.Listen(cfg.IPC.Socket, d)
+	if err != nil {
+		return err
+	}
+	d.SetEventSink(srv)
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigs
-		daemon.Stop()
+		d.Stop()
+		srv.Close()
 	}()
 
-	return daemon.Run()
+	d.RunLoops()
+	return nil
 }
 
 // readPassphrase resolves the keyfile passphrase: passphrase_file, then

@@ -198,13 +198,18 @@ type App struct {
 	// automatically once a chat session comes online, so a new user never
 	// has to learn what a Yggdrasil key even is to end up talking to
 	// someone. See defaultSeedYggdrasilKey.
-	SeedYggdrasilKey  string
-	MeshRuntime       *meshruntime.Runtime
-	MeshState         meshruntime.Snapshot
-	PaletteOpen       bool
-	PaletteCursor     int
-	PostViewport      viewport.Model
-	PostViewportReady bool
+	SeedYggdrasilKey string
+	// SeedBootstrapPeers are Yggdrasil transport peers an embedded chat
+	// daemon dials to reach the overlay at all — SeedYggdrasilKey alone
+	// is a federation target, not a physical link. See
+	// defaultSeedBootstrapPeer.
+	SeedBootstrapPeers []string
+	MeshRuntime        *meshruntime.Runtime
+	MeshState          meshruntime.Snapshot
+	PaletteOpen        bool
+	PaletteCursor      int
+	PostViewport       viewport.Model
+	PostViewportReady  bool
 }
 
 // Palette: deliberately small and consistent — one color per meaning, reused
@@ -265,6 +270,15 @@ const navigationSource = "flashback:navigation:v6-sitemap-parent-ancestors"
 // BACKFLASH_SEED_KEY; set it to "-" to disable auto-connect entirely.
 const defaultSeedYggdrasilKey = "66de53ae2ecbef6c404cd2ffec0fa261c0eae4c978727472017bffa0ef655a31"
 
+// defaultSeedBootstrapPeer is the same well-known seed's own reachable
+// Yggdrasil transport address. It does double duty: it's the physical
+// link an embedded chat daemon dials to reach the overlay at all
+// (defaultSeedYggdrasilKey alone is a federation target, not a route —
+// see EmbeddedOptions.BootstrapPeers), and once on the overlay, the same
+// node is also that federation target. Override with
+// BACKFLASH_SEED_PEER (comma-separated for more than one).
+const defaultSeedBootstrapPeer = "tcp://77.42.49.189:4243"
+
 func New(s *store.Store, c *flashback.Client) App {
 	input := textinput.New()
 	input.Prompt = "> "
@@ -287,6 +301,10 @@ func New(s *store.Store, c *flashback.Client) App {
 	}
 	if app.SeedYggdrasilKey == "-" {
 		app.SeedYggdrasilKey = ""
+	}
+	app.SeedBootstrapPeers = []string{defaultSeedBootstrapPeer}
+	if override := strings.TrimSpace(os.Getenv("BACKFLASH_SEED_PEER")); override != "" {
+		app.SeedBootstrapPeers = strings.Split(override, ",")
 	}
 	return app
 }
@@ -429,7 +447,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.Input.Placeholder = ""
 			a.Status = "E2E-CHATT · identiteten är upplåst lokalt"
 			playSound(soundConfirmation)
-			return a, connectGandr(a.Gandr)
+			return a, connectGandr(a.Gandr, a.SeedYggdrasilKey, a.SeedBootstrapPeers)
 		}
 	case gandrSessionMsg:
 		if m.err != nil {
@@ -2552,18 +2570,30 @@ func unlockGandr(subsystem *gandr.Subsystem, passphrase string) tea.Cmd {
 	}
 }
 
-func connectGandr(subsystem *gandr.Subsystem) tea.Cmd {
+func connectGandr(subsystem *gandr.Subsystem, seedKey string, bootstrapPeers []string) tea.Cmd {
 	return func() tea.Msg {
 		if subsystem == nil {
 			return gandrSessionMsg{err: fmt.Errorf("E2E-CHATT-gränsen saknas")}
 		}
-		socket := gandrSocketPath()
-		session, err := subsystem.Connect(socket)
+		// Prefer an external gandrd if one happens to be running (self-
+		// hosters, or the seed server itself) — otherwise BACKFLASH runs
+		// its own daemon entirely in-process (see
+		// Subsystem.ConnectEmbedded), so an ordinary user never has to
+		// install or run a second background service just to chat.
+		session, err := subsystem.Connect(gandrSocketPath())
 		offline := false
 		if err != nil {
-			// Keep the local encrypted chat usable when gandrd is stopped. The
-			// session is deliberately marked offline; sends are stored locally
-			// and are not presented as delivered over the network.
+			session, err = subsystem.ConnectEmbedded(gandr.EmbeddedOptions{
+				SeedYggdrasilKey: seedKey,
+				BootstrapPeers:   bootstrapPeers,
+			})
+		}
+		if err != nil {
+			// Last resort: keep the local encrypted chat usable even if
+			// the embedded daemon itself couldn't start (e.g. no usable
+			// Yggdrasil transport at all). The session is deliberately
+			// marked offline; sends are stored locally and are not
+			// presented as delivered over the network.
 			session, err = subsystem.Connect("")
 			if err != nil {
 				return gandrSessionMsg{err: err}

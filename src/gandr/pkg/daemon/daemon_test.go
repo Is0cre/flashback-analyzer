@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"context"
@@ -16,9 +16,29 @@ import (
 	"github.com/gandr-net/gandr/pkg/store"
 )
 
-// testNode is one running daemon plus its plumbing.
+// testDefaultOptions mirrors cmd/gandrd's defaultConfig(), translated to
+// Options, so these tests exercise realistic settings rather than zero
+// values.
+func testDefaultOptions() Options {
+	return Options{
+		UserAgent:      "gandrd-test/0.1.0",
+		Capabilities:   proto.CapChat | proto.CapFeed | proto.CapForum | proto.CapRelay,
+		Relay:          true,
+		MaxPeers:       200,
+		DefaultTrust:   proto.TrustNeutral,
+		MaxMessageAge:  604800,
+		MaxPayloadSize: 65535,
+		RateLimitRPM:   600,
+	}
+}
+
+// testNode is one running daemon plus its plumbing, exposed over a real
+// IPC socket exactly like cmd/gandrd wires it — these tests exercise the
+// daemon the same way a standalone gandrd process would be used, not just
+// the in-process API.
 type testNode struct {
 	daemon    *Daemon
+	server    *ipc.Server
 	transport *network.EmbeddedTransport
 	socket    string
 }
@@ -26,11 +46,17 @@ type testNode struct {
 func startNode(t *testing.T, listen, peers []string, seeds []string) *testNode {
 	t.Helper()
 	dir := t.TempDir()
-	cfg := defaultConfig()
-	cfg.Identity.Keyfile = filepath.Join(dir, "identity.key")
-	cfg.Storage.Path = filepath.Join(dir, "objects")
-	cfg.IPC.Socket = filepath.Join(dir, "gandr.sock")
-	cfg.Peering.Seeds = seeds
+	opts := testDefaultOptions()
+
+	var seedKeys [][]byte
+	for _, s := range seeds {
+		k, err := hex.DecodeString(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seedKeys = append(seedKeys, k)
+	}
+	opts.Seeds = seedKeys
 
 	id, err := identity.Generate("node")
 	if err != nil {
@@ -48,23 +74,32 @@ func startNode(t *testing.T, listen, peers []string, seeds []string) *testNode {
 	if err != nil {
 		t.Fatal(err)
 	}
-	objects, err := store.Open(cfg.Storage.Path)
+	objects, err := store.Open(filepath.Join(dir, "objects"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := NewDaemon(cfg, id, transport, objects)
+	d, err := New(opts, id, transport, objects)
 	if err != nil {
 		t.Fatal(err)
 	}
-	go d.Run()
-	t.Cleanup(d.Stop)
-	return &testNode{daemon: d, transport: transport, socket: cfg.IPC.Socket}
+	socket := filepath.Join(dir, "gandr.sock")
+	srv, err := ipc.Listen(socket, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.SetEventSink(srv)
+	go d.RunLoops()
+	t.Cleanup(func() {
+		d.Stop()
+		srv.Close()
+	})
+	return &testNode{daemon: d, server: srv, transport: transport, socket: socket}
 }
 
 // TestTwoDaemonsEndToEnd runs the full stack: two daemons federate over
-// embedded Yggdrasil; a client posts a chat message through one
-// daemon's Unix socket and another client receives it from the other
-// daemon's socket.
+// embedded Yggdrasil; a client posts a chat message through one daemon's
+// Unix socket and another client receives it from the other daemon's
+// socket.
 func TestTwoDaemonsEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping full-stack test in -short mode")
@@ -212,8 +247,8 @@ func TestTwoDaemonsEndToEnd(t *testing.T) {
 	}
 }
 
-// TestDeleteRejectsForeignContent verifies nobody can delete content
-// they did not author.
+// TestDeleteRejectsForeignContent verifies nobody can delete content they
+// did not author.
 func TestDeleteRejectsForeignContent(t *testing.T) {
 	a := startNode(t, []string{"tcp://127.0.0.1:0"}, nil, nil)
 
@@ -257,22 +292,45 @@ func TestDeleteRejectsForeignContent(t *testing.T) {
 
 // TestRateLimit verifies the per-peer rate limiter.
 func TestRateLimit(t *testing.T) {
-	a := startNode(t, []string{"tcp://127.0.0.1:0"}, nil, nil)
-	a.daemon.cfg.Limits.RateLimitRPM = 5
+	dir := t.TempDir()
+	opts := testDefaultOptions()
+	opts.RateLimitRPM = 5
+
+	id, err := identity.Generate("node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, yggPriv, err := crypto.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, err := network.NewEmbedded(network.EmbeddedConfig{PrivateKey: yggPriv, Listen: []string{"tcp://127.0.0.1:0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects, err := store.Open(filepath.Join(dir, "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(opts, id, transport, objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(d.Stop)
 
 	var peer [32]byte
 	peer[0] = 1
 	for i := 0; i < 5; i++ {
-		if !a.daemon.allowRate(peer) {
+		if !d.allowRate(peer) {
 			t.Fatalf("message %d blocked under the limit", i)
 		}
 	}
-	if a.daemon.allowRate(peer) {
+	if d.allowRate(peer) {
 		t.Fatal("sixth message in a minute allowed at limit 5")
 	}
 	var other [32]byte
 	other[0] = 2
-	if !a.daemon.allowRate(other) {
+	if !d.allowRate(other) {
 		t.Fatal("rate limit leaked across peers")
 	}
 }

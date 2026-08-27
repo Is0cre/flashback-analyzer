@@ -127,13 +127,17 @@ klientlager). Det är inte "krypterad Discord": det finns ingen server som
   analytics, ingen telemetri. En beslagtagen nod ger ingenting användbart.
 - **Routat över Yggdrasil**, inbäddat direkt i klienten — inget separat
   VPN, ingen TUN, inget root-krav.
+- **Ingen separat daemon.** `gandrd` (protokollets fristående nod-daemon,
+  se [src/gandr/README.md](src/gandr/README.md)) körs numera inbäddad
+  direkt i BACKFLASH-processen — samma protokoll, samma federation, bara
+  utan ett eget program eller en Unix-socket att installera. En extern
+  `gandrd` fungerar fortfarande och prioriteras om en hittas (självhostare,
+  se [src/gandr/docs/SETUP.md](src/gandr/docs/SETUP.md)), men ingen
+  vanlig användare behöver bry sig om det.
 
 Starta med `g` i BACKFLASH. Första gången skapas ett lokalt valv (lösenord
-krypterar din identitetsnyckel på disk); `gandrd` behöver köra separat som
-daemon för att faktiskt nå andra noder — se
-[src/gandr/README.md](src/gandr/README.md) för protokolldetaljer och
-[src/gandr/docs/SETUP.md](src/gandr/docs/SETUP.md) för att sätta upp en
-daemon.
+krypterar din identitetsnyckel på disk); anslutningen till nätverket sker
+sedan automatiskt.
 
 ### Peering
 
@@ -147,10 +151,14 @@ en kurir, inte en värd, precis som vilken annan nod som helst.
 
 BACKFLASH ansluter automatiskt till den publika seeden första gången
 chatten startas, så en ny användare aldrig behöver veta vad en
-Yggdrasil-nyckel ens är. Nyckeln bakas in i klienten
-(`defaultSeedYggdrasilKey` i `internal/tui/app.go`) — sätt
-`BACKFLASH_SEED_KEY=<64 hex>` för att peka på en egen seed i stället, eller
-`BACKFLASH_SEED_KEY=-` för att stänga av auto-anslutningen helt.
+Yggdrasil-nyckel ens är. Seedens nyckel *och* dess nåbara adress bakas in
+i klienten (`defaultSeedYggdrasilKey` och `defaultSeedBootstrapPeer` i
+`internal/tui/app.go`) — adressen är vad som faktiskt tar en inbäddad
+klient ut på Yggdrasil-overlayen alls, nyckeln är vem den sedan federerar
+med där. Sätt `BACKFLASH_SEED_KEY=<64 hex>` och/eller
+`BACKFLASH_SEED_PEER=<uri>[,<uri>...]` för att peka på en egen seed i
+stället, eller `BACKFLASH_SEED_KEY=-` för att stänga av auto-anslutningen
+helt.
 
 `gandrd` (seed-daemonen) byggs numera av samma release-pipeline som
 `backflash`/`backflash-cache` — inget behöver byggas på servern. Se

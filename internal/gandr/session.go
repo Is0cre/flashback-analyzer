@@ -18,20 +18,39 @@ import (
 	"github.com/gandr-net/gandr/pkg/proto"
 )
 
+// daemonClient is the subset of *ipc.Client's behavior Session needs.
+// embeddedClient (embedded.go) satisfies this too, wrapping an in-process
+// *daemon.Daemon instead of a Unix socket — Session's methods never need
+// to know or care which one they're talking to.
+type daemonClient interface {
+	Close() error
+	Incoming() <-chan *proto.Envelope
+	Done() <-chan struct{}
+	Subscribe(ctx context.Context, channel [32]byte) error
+	Unsubscribe(ctx context.Context, channel [32]byte) error
+	Send(ctx context.Context, env *proto.Envelope) error
+	Connect(ctx context.Context, yggKey [32]byte) error
+	PeerList(ctx context.Context) ([]ipc.PeerInfo, error)
+}
+
 // Session is the deliberately short-lived BACKFLASH-side handle to GANDR's
 // private client layer. It is created only after the user unlocks the GANDR
 // identity. BACKFLASH never puts this database, socket or message stream into
 // the public cache mesh.
 type Session struct {
 	db     *gandrclientdb.DB
-	client *ipc.Client
+	client daemonClient
 	id     *gandridentity.Identity
 	groups map[[32]byte][32]byte
 }
 
-// Connect opens GANDR's encrypted client database. Network transport is
-// optional: BACKFLASH can run the private GANDR client locally while the
-// in-process transport is unavailable.
+// Connect opens GANDR's encrypted client database and, if socketPath is
+// set, dials an external gandrd over its Unix socket. This is the
+// power-user/self-hosted path; ordinary users go through
+// Subsystem.ConnectEmbedded (embedded.go) instead, which needs no
+// separate daemon process at all. socketPath == "" gives a fully
+// offline, local-only session — used directly by tests, and as
+// connectGandr's last-resort fallback in internal/tui/app.go.
 func (s *Subsystem) Connect(socketPath string) (*Session, error) {
 	if s == nil {
 		return nil, errors.New("E2E-CHATT-gränsen saknas")
@@ -48,13 +67,19 @@ func (s *Subsystem) Connect(socketPath string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	var client *ipc.Client
+	// Built as an interface value from the start, and only ever assigned
+	// a genuinely non-nil concrete client — assigning a nil *ipc.Client
+	// into an already-interface-typed variable would produce a non-nil
+	// interface wrapping a nil pointer, silently breaking every
+	// `s.client != nil` check below.
+	var client daemonClient
 	if socketPath != "" {
-		client, err = ipc.Dial(socketPath)
+		dialed, err := ipc.Dial(socketPath)
 		if err != nil {
 			_ = db.Close()
 			return nil, err
 		}
+		client = dialed
 	}
 	return &Session{db: db, client: client, id: id, groups: make(map[[32]byte][32]byte)}, nil
 }

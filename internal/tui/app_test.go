@@ -538,6 +538,44 @@ func TestGandrChatShowsWelcomeBannerAndPersistentInputBox(t *testing.T) {
 	}
 }
 
+func TestGandrChatShowsPeerCountNotJustAGreenDot(t *testing.T) {
+	// A real (but bootstrap-peer-less) embedded session: Online() is
+	// true — there's a real client — but it has zero actual peers,
+	// exactly the "green dot, nothing reachable" state that was
+	// invisible before and cost a very long debugging session to
+	// diagnose from the outside.
+	subsystem := gandr.NewAt(filepath.Join(t.TempDir(), "gandr", "identity.key"))
+	if err := subsystem.Create("password"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := subsystem.ConnectEmbedded(gandr.EmbeddedOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if !session.Online() {
+		t.Fatal("en embedded session ska alltid rapportera Online")
+	}
+
+	a := New(nil, nil)
+	a.CurrentView = ViewGandrChat
+	a.Width = 120
+	a.GandrSession = session
+	a.GandrChannels = []gandr.Channel{{Name: "general"}}
+	a.GandrPeers = nil
+
+	view := a.View()
+	if !strings.Contains(view, "0 peers — ingen ansluten ännu") {
+		t.Fatalf("visade inte att nätverket är uppe men utan peers: %q", view)
+	}
+
+	a.GandrPeers = []gandr.Peer{{Identity: [32]byte{1}}}
+	view = a.View()
+	if !strings.Contains(view, "NÄTVERK · 1 peer") {
+		t.Fatalf("visade inte peer-antalet när en peer finns: %q", view)
+	}
+}
+
 func TestGandrSenderStyleIsStableAndSelfIsDistinct(t *testing.T) {
 	var alice [32]byte
 	alice[0] = 0x11

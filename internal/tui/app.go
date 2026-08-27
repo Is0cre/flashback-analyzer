@@ -1741,7 +1741,18 @@ func renderGandrChat(a App) string {
 		channel := a.GandrChannels[min(a.Cursor, len(a.GandrChannels)-1)]
 		main.WriteString(sectionStyle.Render("# " + channel.Name))
 		if a.GandrSession.Online() {
-			main.WriteString("  " + online.Render("● NÄTVERK"))
+			// A green "NÄTVERK" dot only ever meant "there's a client
+			// object" — it said nothing about whether anyone's actually
+			// reachable. The peer count is the number that actually
+			// answers "will a message go anywhere": 0 means connected to
+			// nothing yet (or the seed dropped), not a healthy state,
+			// however green the dot above it looks.
+			peerCount := fmt.Sprintf("%d peers", len(a.GandrPeers))
+			if len(a.GandrPeers) > 0 {
+				main.WriteString("  " + online.Render("● NÄTVERK · "+peerCount))
+			} else {
+				main.WriteString("  " + warning.Render("● NÄTVERK · "+peerCount+" — ingen ansluten ännu"))
+			}
 		} else {
 			main.WriteString("  " + warning.Render("○ LOKAL"))
 		}

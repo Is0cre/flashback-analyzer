@@ -216,6 +216,19 @@ func (d *Daemon) acceptLoop() {
 // configured seed has a live session.
 const seedRetryInterval = 15 * time.Second
 
+// seedDialTimeout bounds one dial+handshake attempt. It must exceed
+// federation's own handshakeTimeout (30s): if it were tied to
+// seedRetryInterval instead, the client would abort an attempt that was
+// still legitimately in flight (real handshakes take several sequential
+// round trips, more under packet loss) and retry with a fresh HELLO on
+// the same mux connection. The responder's stale Respond() goroutine —
+// still waiting out its own 30s budget for the COMPLETE that will now
+// never come — reads that HELLO instead and fails with "unexpected
+// message type", wedging the connection until a process restart changes
+// the mux epoch. Giving the attempt its own longer budget, independent
+// of the retry cadence, avoids racing against ourselves.
+const seedDialTimeout = 45 * time.Second
+
 // seedLoop keeps federation with the configured seed nodes alive: at
 // startup the overlay may not be routable yet, and a seed can reboot at
 // any time, so a single dial attempt is never enough. Each pass dials
@@ -257,7 +270,7 @@ func (d *Daemon) seedConnected(key []byte) bool {
 // dialSeed makes one bounded federation attempt to a seed node.
 func (d *Daemon) dialSeed(key []byte) {
 	d.debugf("seed: dialing %s", fp(key))
-	ctx, cancel := context.WithTimeout(d.ctx, seedRetryInterval)
+	ctx, cancel := context.WithTimeout(d.ctx, seedDialTimeout)
 	defer cancel()
 	conn, err := d.transport.Dial(ctx, network.PeerAddr{YggKey: ed25519.PublicKey(key)})
 	if err != nil {

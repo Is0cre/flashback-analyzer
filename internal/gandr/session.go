@@ -227,6 +227,10 @@ type PrivateGroup struct {
 	ID        [32]byte
 	Name      string
 	CreatedAt int64
+	// PeerPubkey is set only for a 1:1 direct message (see
+	// StartDirectMessage) — nil for a real, possibly multi-party,
+	// password-protected group.
+	PeerPubkey *[32]byte
 }
 
 type PrivateGroupMessage struct {
@@ -449,15 +453,15 @@ func (s *Session) StartDirectMessage(peerPubkey [32]byte, peerName string) (Priv
 	for _, g := range existing {
 		if g.ID == id {
 			s.subscribeGroup(id)
-			return PrivateGroup{ID: g.ID, Name: g.Name, CreatedAt: g.CreatedAt}, nil
+			return PrivateGroup{ID: g.ID, Name: g.Name, CreatedAt: g.CreatedAt, PeerPubkey: &peerPubkey}, nil
 		}
 	}
 	created := time.Now().UnixNano()
-	if err := s.db.SavePrivateGroup(gandrclientdb.PrivateGroup{ID: id, Name: name, CreatedAt: created}); err != nil {
+	if err := s.db.SavePrivateGroup(gandrclientdb.PrivateGroup{ID: id, Name: name, CreatedAt: created, PeerPubkey: &peerPubkey}); err != nil {
 		return PrivateGroup{}, err
 	}
 	s.subscribeGroup(id)
-	return PrivateGroup{ID: id, Name: name, CreatedAt: created}, nil
+	return PrivateGroup{ID: id, Name: name, CreatedAt: created, PeerPubkey: &peerPubkey}, nil
 }
 
 func (s *Session) PrivateGroups() ([]PrivateGroup, error) {
@@ -470,7 +474,7 @@ func (s *Session) PrivateGroups() ([]PrivateGroup, error) {
 	}
 	out := make([]PrivateGroup, 0, len(items))
 	for _, item := range items {
-		out = append(out, PrivateGroup{ID: item.ID, Name: item.Name, CreatedAt: item.CreatedAt})
+		out = append(out, PrivateGroup{ID: item.ID, Name: item.Name, CreatedAt: item.CreatedAt, PeerPubkey: item.PeerPubkey})
 	}
 	return out, nil
 }

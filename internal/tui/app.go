@@ -1257,6 +1257,11 @@ func gandrHandleSidebarClick(a App, action gandrSidebarAction) (tea.Model, tea.C
 		switch {
 		case a.GandrActiveGroup != nil && *a.GandrActiveGroup == group.ID:
 			// Already open — nothing to do.
+		case group.PeerPubkey != nil:
+			// A DM's key is derived, never password-protected — even
+			// after an app restart clears the in-memory cache, opening
+			// it again is a silent re-derivation, not a prompt.
+			return a, startGandrDM(a.GandrSession, *group.PeerPubkey, group.Name)
 		case a.GandrSession.IsGroupUnlocked(group.ID):
 			return a, openGandrGroup(a.GandrSession, group.ID)
 		default:
@@ -1748,24 +1753,73 @@ func gandrSidebarRows(a App, sidebarWidth int) ([]string, []gandrSidebarAction) 
 		lines = append(lines, critical.Render("[!] radera E2E-CHATT-valv"))
 		actions = append(actions, gandrSidebarAction{Kind: gandrActionDeleteVault})
 	}
-	if len(a.GandrGroups) > 0 {
+	// DMs and real (possibly multi-party, password-protected) groups both
+	// live in a.GandrGroups — see PrivateGroup.PeerPubkey — but are
+	// listed in separate sections: conflating a 1:1 conversation with a
+	// named group under one label reads as one more unlabeled kind of
+	// "group" to a new user, when it's the more familiar and more common
+	// case of the two.
+	if hasGandrDMs(a.GandrGroups) {
+		lines = append(lines, "", sectionStyle.Render("DIREKTMEDDELANDEN"))
+		actions = append(actions, gandrSidebarAction{}, gandrSidebarAction{})
+		for i, group := range a.GandrGroups {
+			if group.PeerPubkey == nil {
+				continue
+			}
+			lines = append(lines, gandrGroupSidebarLine(a, group, sidebarWidth))
+			actions = append(actions, gandrSidebarAction{Kind: gandrActionOpenGroup, Index: i})
+		}
+	}
+	if hasGandrRealGroups(a.GandrGroups) {
 		lines = append(lines, "", sectionStyle.Render("PRIVATA GRUPPER"))
 		actions = append(actions, gandrSidebarAction{}, gandrSidebarAction{})
 		for i, group := range a.GandrGroups {
-			marker := "🔒"
-			switch {
-			case a.GandrActiveGroup != nil && *a.GandrActiveGroup == group.ID:
-				marker = "›"
-			case a.GandrSession != nil && a.GandrSession.IsGroupUnlocked(group.ID):
-				marker = "🔓"
+			if group.PeerPubkey != nil {
+				continue
 			}
-			lines = append(lines, marker+" "+truncate(group.Name, sidebarWidth-5))
+			lines = append(lines, gandrGroupSidebarLine(a, group, sidebarWidth))
 			actions = append(actions, gandrSidebarAction{Kind: gandrActionOpenGroup, Index: i})
 		}
 		lines = append(lines, muted.Render("/grupp lista"))
 		actions = append(actions, gandrSidebarAction{Kind: gandrActionListGroups})
 	}
 	return lines, actions
+}
+
+func hasGandrDMs(groups []gandr.PrivateGroup) bool {
+	for _, g := range groups {
+		if g.PeerPubkey != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func hasGandrRealGroups(groups []gandr.PrivateGroup) bool {
+	for _, g := range groups {
+		if g.PeerPubkey == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// gandrGroupSidebarLine renders one row shared by both the DM and real
+// group sections: a lock/open/active marker (DMs are never "locked" in
+// the password sense, but still show 🔓 vs › the same way) followed by
+// the truncated name.
+func gandrGroupSidebarLine(a App, group gandr.PrivateGroup, sidebarWidth int) string {
+	marker := "🔒"
+	if group.PeerPubkey != nil {
+		marker = "💬"
+	}
+	switch {
+	case a.GandrActiveGroup != nil && *a.GandrActiveGroup == group.ID:
+		marker = "›"
+	case a.GandrSession != nil && a.GandrSession.IsGroupUnlocked(group.ID):
+		marker = "🔓"
+	}
+	return marker + " " + truncate(group.Name, sidebarWidth-5)
 }
 
 // gandrSenderPalette assigns each chat participant a stable color derived

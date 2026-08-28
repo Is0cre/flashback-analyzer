@@ -200,6 +200,67 @@ func TestConnectEmbeddedFederatesAndExchangesAChatMessage(t *testing.T) {
 // contains no key material — see gandrcrypto.DeriveGroupKey) and reads
 // Alice's message. The relay in between only ever handles an opaque
 // ciphertext blob under a random channel id.
+// TestStartDirectMessageSurvivesRestartWithoutAPassword pins a real bug
+// found while wiring the DM/group split into the sidebar: PrivateGroup
+// now carries a PeerPubkey to tell a DM apart from a real,
+// password-protected group, and the sidebar used that to route a DM
+// click straight back through StartDirectMessage instead of the
+// password-prompt path a real group takes. Before that fix, reopening a
+// DM after a restart — where the in-memory derived-key cache is
+// necessarily empty — would have prompted for a password that was never
+// set, because IsGroupUnlocked is false for every group right after
+// startup regardless of kind.
+func TestStartDirectMessageSurvivesRestartWithoutAPassword(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "identity.key")
+	subsystem := NewAt(keyPath)
+	if err := subsystem.Create("mitt-losenord"); err != nil {
+		t.Fatal(err)
+	}
+
+	var peer [32]byte
+	peer[0] = 0x77
+
+	session, err := subsystem.Connect("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := session.StartDirectMessage(peer, "Vän")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.PeerPubkey == nil || *first.PeerPubkey != peer {
+		t.Fatal("PeerPubkey sattes inte på det nya DM:et")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh Session over the same on-disk identity and db, simulating
+	// an app restart: the in-memory derived-key cache starts empty.
+	session, err = subsystem.Connect("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if session.IsGroupUnlocked(first.ID) {
+		t.Fatal("test-förutsättning bruten: gruppen ska vara olåst innan omstart simuleras")
+	}
+	second, err := session.StartDirectMessage(peer, "")
+	if err != nil {
+		t.Fatalf("återöppning av DM efter omstart kräver inget lösenord men misslyckades: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatal("samma par gav olika kanal-id andra gången")
+	}
+	if second.PeerPubkey == nil || *second.PeerPubkey != peer {
+		t.Fatal("PeerPubkey saknades efter omstart")
+	}
+	if !session.IsGroupUnlocked(second.ID) {
+		t.Fatal("DM:et låstes inte upp av StartDirectMessage")
+	}
+}
+
 func TestPrivateGroupSharesAcrossTwoIndependentEmbeddedSessions(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping full-stack test in -short mode")

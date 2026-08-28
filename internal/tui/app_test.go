@@ -247,6 +247,42 @@ func TestGandrSidebarRowsStayAlignedWithClickActions(t *testing.T) {
 	}
 }
 
+func TestGandrSidebarSeparatesDMsFromRealGroups(t *testing.T) {
+	var peer [32]byte
+	peer[0] = 0x11
+	a := New(nil, nil)
+	a.GandrGroups = []gandr.PrivateGroup{
+		{Name: "Hemlig grupp"},
+		{Name: "Bob", PeerPubkey: &peer},
+	}
+
+	lines, actions := gandrSidebarRows(a, 24)
+	if len(lines) != len(actions) {
+		t.Fatalf("lines (%d) och actions (%d) har olika längd", len(lines), len(actions))
+	}
+	joined := strings.Join(lines, "\n")
+	dmHeader := strings.Index(joined, "DIREKTMEDDELANDEN")
+	groupHeader := strings.Index(joined, "PRIVATA GRUPPER")
+	bobLine := strings.Index(joined, "Bob")
+	secretLine := strings.Index(joined, "Hemlig grupp")
+	if dmHeader < 0 || groupHeader < 0 {
+		t.Fatalf("saknar en av rubrikerna: %q", joined)
+	}
+	if !(dmHeader < bobLine && bobLine < groupHeader) {
+		t.Fatalf("Bob (DM) hamnade inte under DIREKTMEDDELANDEN före PRIVATA GRUPPER: %q", joined)
+	}
+	if !(groupHeader < secretLine) {
+		t.Fatalf("Hemlig grupp (riktig grupp) hamnade inte under PRIVATA GRUPPER: %q", joined)
+	}
+	for i, line := range lines {
+		if strings.Contains(line, "Bob") {
+			if actions[i].Kind != gandrActionOpenGroup || actions[i].Index != 1 {
+				t.Fatalf("DM-raden pekar inte på rätt index i a.GandrGroups: %#v", actions[i])
+			}
+		}
+	}
+}
+
 func TestClickingLockedGroupPromptsForPassword(t *testing.T) {
 	var groupID [32]byte
 	groupID[0] = 0x9

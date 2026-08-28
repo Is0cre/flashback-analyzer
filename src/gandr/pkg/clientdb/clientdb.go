@@ -90,10 +90,15 @@ type ChatMessage struct {
 
 // PrivateGroup contains only local group metadata. The wrapped key is an
 // opaque password-protected blob and the group name is encrypted at rest.
+// PeerPubkey is set only for a 1:1 direct message (see
+// gandr.Session.StartDirectMessage) — nil for a real, possibly
+// multi-party, password-protected group. It's what lets the UI tell the
+// two apart without guessing from the name.
 type PrivateGroup struct {
-	ID        [32]byte
-	Name      string
-	CreatedAt int64
+	ID         [32]byte
+	Name       string
+	CreatedAt  int64
+	PeerPubkey *[32]byte
 }
 
 type PrivateGroupMessage struct {
@@ -153,7 +158,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 CREATE TABLE IF NOT EXISTS private_groups (
     group_id    BLOB PRIMARY KEY,
     name        BLOB NOT NULL,
-    created_at  INTEGER NOT NULL
+    created_at  INTEGER NOT NULL,
+    peer_pubkey BLOB
 );
 CREATE TABLE IF NOT EXISTS private_group_messages (
     msg_hash    BLOB PRIMARY KEY,
@@ -192,7 +198,28 @@ func Open(path string, identityKey ed25519.PrivateKey) (*DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("clientdb: initializing schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("clientdb: migrating schema: %w", err)
+	}
 	return &DB{db: db, key: key}, nil
+}
+
+// migrate applies schema changes CREATE TABLE IF NOT EXISTS can't: columns
+// added to a table that already existed on disk from an earlier version.
+// Each statement is best-effort — SQLite has no "ADD COLUMN IF NOT
+// EXISTS", so a "duplicate column" error (already applied) is the
+// expected steady state and is swallowed; any other error is real.
+func migrate(db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE private_groups ADD COLUMN peer_pubkey BLOB`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
+	return nil
 }
 
 // Close closes the database.
@@ -390,15 +417,21 @@ func (d *DB) SavePrivateGroup(group PrivateGroup) error {
 	if err != nil {
 		return err
 	}
+	// peer_pubkey is a lookup key (like the group id itself), not sealed:
+	// it's already public information, the DM's counterparty pubkey.
+	var peer []byte
+	if group.PeerPubkey != nil {
+		peer = group.PeerPubkey[:]
+	}
 	_, err = d.db.Exec(`INSERT INTO private_groups
-		(group_id, name, created_at) VALUES (?, ?, ?)
+		(group_id, name, created_at, peer_pubkey) VALUES (?, ?, ?, ?)
 		ON CONFLICT(group_id) DO UPDATE SET name=excluded.name`,
-		group.ID[:], name, group.CreatedAt)
+		group.ID[:], name, group.CreatedAt, peer)
 	return err
 }
 
 func (d *DB) ListPrivateGroups() ([]PrivateGroup, error) {
-	rows, err := d.db.Query(`SELECT group_id, name, created_at
+	rows, err := d.db.Query(`SELECT group_id, name, created_at, peer_pubkey
 		FROM private_groups ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -406,9 +439,9 @@ func (d *DB) ListPrivateGroups() ([]PrivateGroup, error) {
 	defer rows.Close()
 	var out []PrivateGroup
 	for rows.Next() {
-		var id, name []byte
+		var id, name, peer []byte
 		var created int64
-		if err := rows.Scan(&id, &name, &created); err != nil {
+		if err := rows.Scan(&id, &name, &created, &peer); err != nil {
 			return nil, err
 		}
 		opened, err := d.open("private_groups", id, name)
@@ -419,6 +452,11 @@ func (d *DB) ListPrivateGroups() ([]PrivateGroup, error) {
 		copy(group.ID[:], id)
 		group.Name = string(opened)
 		group.CreatedAt = created
+		if len(peer) == 32 {
+			var p [32]byte
+			copy(p[:], peer)
+			group.PeerPubkey = &p
+		}
 		out = append(out, group)
 	}
 	return out, rows.Err()

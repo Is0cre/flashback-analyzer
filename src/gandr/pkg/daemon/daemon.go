@@ -107,9 +107,31 @@ type Daemon struct {
 
 	mu       sync.Mutex
 	sink     EventSink
-	profiles map[[32]byte][32]byte // pubkey -> latest profile content hash
+	profiles map[[32]byte]profileEntry
 	rates    map[[32]byte]*rateWindow
 }
+
+// profileEntry is the newest known profile content hash for a pubkey,
+// plus when it was last touched — an unbounded number of distinct
+// pubkeys can flood through relayed MsgProfile envelopes (each only
+// needs a cheap, freshly generated Ed25519 keypair and one valid
+// signature), so pruneLoop needs a recency signal to evict entries for
+// identities that stopped showing up, not just a hash to keep forever.
+type profileEntry struct {
+	hash     [32]byte
+	lastSeen time.Time
+}
+
+// profileTTL bounds how long an inactive identity's profile entry is
+// kept before pruneLoop reclaims it.
+const profileTTL = 7 * 24 * time.Hour
+
+// rateWindowTTL bounds how long a directly-connected peer's rate-limit
+// window is kept after it stops sending anything — otherwise a peer
+// that reconnects under a fresh identity each time (the physical link
+// this is keyed on, not a relayed message's sender) leaves one
+// abandoned entry per identity forever.
+const rateWindowTTL = 10 * time.Minute
 
 // New assembles a Daemon from loaded components. The caller provides the
 // identity (already decrypted) and a started transport. The daemon has no
@@ -128,7 +150,7 @@ func New(opts Options, id *identity.Identity, transport network.Transport, objec
 		transport: transport,
 		table:     table,
 		objects:   objects,
-		profiles:  make(map[[32]byte][32]byte),
+		profiles:  make(map[[32]byte]profileEntry),
 		rates:     make(map[[32]byte]*rateWindow),
 		ctx:       ctx,
 		cancel:    cancel,
@@ -429,11 +451,13 @@ func (d *Daemon) recordProfile(env *proto.Envelope) {
 	defer d.mu.Unlock()
 	if existing, ok := d.profiles[env.Sender]; ok {
 		// keep only the newest by timestamp
-		if cur, err := d.objects.Get(existing); err == nil && cur.Timestamp >= env.Timestamp {
+		if cur, err := d.objects.Get(existing.hash); err == nil && cur.Timestamp >= env.Timestamp {
+			existing.lastSeen = time.Now()
+			d.profiles[env.Sender] = existing
 			return
 		}
 	}
-	d.profiles[env.Sender] = hash
+	d.profiles[env.Sender] = profileEntry{hash: hash, lastSeen: time.Now()}
 }
 
 // relay floods an envelope to all relaying peers except its origin.
@@ -556,8 +580,30 @@ func (d *Daemon) pruneLoop() {
 		case <-ticker.C:
 			maxAge := time.Duration(d.opts.MaxMessageAge) * time.Second
 			d.objects.Prune(maxAge, time.Now())
+			d.pruneTrackedPeerState()
 		case <-d.ctx.Done():
 			return
+		}
+	}
+}
+
+// pruneTrackedPeerState evicts stale entries from d.profiles and
+// d.rates — both are keyed by identities the daemon doesn't control
+// (a relayed message's signed sender, and a directly federated peer's
+// identity respectively), so both grow without bound unless inactive
+// entries are reclaimed on a schedule.
+func (d *Daemon) pruneTrackedPeerState() {
+	now := time.Now()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for pubkey, entry := range d.profiles {
+		if now.Sub(entry.lastSeen) > profileTTL {
+			delete(d.profiles, pubkey)
+		}
+	}
+	for peer, w := range d.rates {
+		if now.Sub(w.start) > rateWindowTTL {
+			delete(d.rates, peer)
 		}
 	}
 }
@@ -640,10 +686,10 @@ func (d *Daemon) HandleConnect(yggKey [32]byte) error {
 // HandleProfile returns the newest known profile for a pubkey.
 func (d *Daemon) HandleProfile(pubkey [32]byte) (*proto.Envelope, error) {
 	d.mu.Lock()
-	hash, ok := d.profiles[pubkey]
+	entry, ok := d.profiles[pubkey]
 	d.mu.Unlock()
 	if !ok {
 		return nil, store.ErrNotFound
 	}
-	return d.objects.Get(hash)
+	return d.objects.Get(entry.hash)
 }

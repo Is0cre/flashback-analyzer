@@ -301,6 +301,35 @@ func TestGandrMarkChannelReadClearsUnreadBadge(t *testing.T) {
 	}
 }
 
+func TestAppendGandrMessageTrimsUnboundedInMemoryGrowth(t *testing.T) {
+	channel := gandr.Channel{Name: "general"}
+	channel.ID = gandr.ChannelID("general")
+
+	a := New(nil, nil)
+	a.GandrChannels = []gandr.Channel{channel}
+	a.GandrReadCounts = map[[32]byte]int{channel.ID: gandrMaxMessagesPerConversation}
+
+	for i := 0; i < gandrMaxMessagesPerConversation+50; i++ {
+		appendGandrMessage(&a, gandr.Message{ChannelID: channel.ID, Content: fmt.Sprintf("m%d", i)})
+	}
+
+	if got := len(a.GandrMessages[channel.ID]); got != gandrMaxMessagesPerConversation {
+		t.Fatalf("in-memory history grew unbounded: %d messages, want capped at %d", got, gandrMaxMessagesPerConversation)
+	}
+	// The oldest 50 were dropped, so the 50 that were "read" among them
+	// no longer exist to be read — the read count must shrink to match,
+	// not keep counting messages that aren't there anymore.
+	if got := a.GandrReadCounts[channel.ID]; got != gandrMaxMessagesPerConversation-50 {
+		t.Fatalf("read count wasn't adjusted for the trim: got %d, want %d", got, gandrMaxMessagesPerConversation-50)
+	}
+	// The newest message must still be the actual most recent one, not
+	// something dropped by the trim.
+	last := a.GandrMessages[channel.ID][len(a.GandrMessages[channel.ID])-1]
+	if last.Content != fmt.Sprintf("m%d", gandrMaxMessagesPerConversation+49) {
+		t.Fatalf("trim kept the wrong messages: last is %q", last.Content)
+	}
+}
+
 func TestIncomingMessageForActiveChannelNeverShowsUnread(t *testing.T) {
 	var sender [32]byte
 	sender[0] = 0x02

@@ -541,10 +541,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				At: m.message.At,
 			})
 		}
-		if a.GandrMessages == nil {
-			a.GandrMessages = make(map[[32]byte][]gandr.Message)
-		}
-		appendGandrMessage(a.GandrMessages, m.message)
+		appendGandrMessage(&a, m.message)
 		if !m.message.Local {
 			playSound(soundIncomingMessage)
 		}
@@ -564,7 +561,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.GandrGroupMessages == nil {
 			a.GandrGroupMessages = make(map[[32]byte][]gandr.PrivateGroupMessage)
 		}
-		a.GandrGroupMessages[m.message.GroupID] = append(a.GandrGroupMessages[m.message.GroupID], m.message)
+		updated := append(a.GandrGroupMessages[m.message.GroupID], m.message)
+		a.GandrGroupMessages[m.message.GroupID] = gandrTrimAndAdjustReadCount(&a, m.message.GroupID, updated)
 		if a.GandrSession == nil || m.message.Sender != a.GandrSession.PublicKey() {
 			playSound(soundIncomingMessage)
 		}
@@ -829,7 +827,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if len(a.GandrChannels) > 0 {
 						channel := a.GandrChannels[min(a.Cursor, len(a.GandrChannels)-1)]
 						own := gandr.Message{ChannelID: channel.ID, Content: q, At: time.Now().UnixNano(), Local: true}
-						appendGandrMessage(a.GandrMessages, own)
+						appendGandrMessage(&a, own)
 						return a, gandrSend(a.GandrSession, channel.ID, q)
 					}
 					return a, nil
@@ -3449,18 +3447,46 @@ func gandrUnreadCount(a App, id [32]byte, total int) int {
 	return 0
 }
 
-func appendGandrMessage(messages map[[32]byte][]gandr.Message, message gandr.Message) {
-	if messages == nil {
-		return
+// gandrMaxMessagesPerConversation bounds how many messages stay resident
+// in memory per channel or group, independent of how long the process
+// has been running or how much traffic a conversation sees — the local
+// database (see gandrChatHistoryRetention) is still the actual source of
+// truth and isn't affected by this trim.
+const gandrMaxMessagesPerConversation = 1000
+
+func appendGandrMessage(a *App, message gandr.Message) {
+	if a.GandrMessages == nil {
+		a.GandrMessages = make(map[[32]byte][]gandr.Message)
 	}
 	if message.Hash != ([32]byte{}) {
-		for _, existing := range messages[message.ChannelID] {
+		for _, existing := range a.GandrMessages[message.ChannelID] {
 			if existing.Hash == message.Hash {
 				return
 			}
 		}
 	}
-	messages[message.ChannelID] = append(messages[message.ChannelID], message)
+	updated := append(a.GandrMessages[message.ChannelID], message)
+	a.GandrMessages[message.ChannelID] = gandrTrimAndAdjustReadCount(a, message.ChannelID, updated)
+}
+
+// gandrTrimAndAdjustReadCount drops the oldest messages past
+// gandrMaxMessagesPerConversation and shifts the read-count bookkeeping
+// (see GandrReadCounts) by however many were dropped, so an old,
+// long-idle conversation's unread count doesn't suddenly go negative-then
+// -clamped-wrong once its history gets trimmed out from under it.
+func gandrTrimAndAdjustReadCount[T any](a *App, id [32]byte, messages []T) []T {
+	trimmed := len(messages) - gandrMaxMessagesPerConversation
+	if trimmed <= 0 {
+		return messages
+	}
+	if a.GandrReadCounts != nil {
+		if r := a.GandrReadCounts[id] - trimmed; r > 0 {
+			a.GandrReadCounts[id] = r
+		} else {
+			a.GandrReadCounts[id] = 0
+		}
+	}
+	return messages[trimmed:]
 }
 
 func blockSelectedGandr(a App) tea.Cmd {

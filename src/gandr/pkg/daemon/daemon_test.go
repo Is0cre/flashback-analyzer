@@ -334,3 +334,65 @@ func TestRateLimit(t *testing.T) {
 		t.Fatal("rate limit leaked across peers")
 	}
 }
+
+// TestPruneTrackedPeerStateEvictsStaleEntries pins a real unbounded-growth
+// bug: d.profiles is keyed by a relayed message's signed sender (not a
+// directly connected peer at all), so anyone able to relay flood traffic
+// through the daemon can plant one entry per freshly generated identity
+// forever. d.rates is keyed by directly-connected peer identity, which is
+// bounded by table size at any instant but still accumulates one
+// abandoned entry per identity that ever connected and moved on. Both
+// need to be reclaimed once inactive, without touching entries that are
+// still within their TTL.
+func TestPruneTrackedPeerStateEvictsStaleEntries(t *testing.T) {
+	dir := t.TempDir()
+	opts := testDefaultOptions()
+	id, err := identity.Generate("node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, yggPriv, err := crypto.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, err := network.NewEmbedded(network.EmbeddedConfig{PrivateKey: yggPriv, Listen: []string{"tcp://127.0.0.1:0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects, err := store.Open(filepath.Join(dir, "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(opts, id, transport, objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(d.Stop)
+
+	var stalePeer, freshPeer, staleRatePeer, freshRatePeer [32]byte
+	stalePeer[0], freshPeer[0], staleRatePeer[0], freshRatePeer[0] = 1, 2, 3, 4
+
+	d.mu.Lock()
+	d.profiles[stalePeer] = profileEntry{lastSeen: time.Now().Add(-profileTTL - time.Hour)}
+	d.profiles[freshPeer] = profileEntry{lastSeen: time.Now()}
+	d.rates[staleRatePeer] = &rateWindow{start: time.Now().Add(-rateWindowTTL - time.Minute)}
+	d.rates[freshRatePeer] = &rateWindow{start: time.Now()}
+	d.mu.Unlock()
+
+	d.pruneTrackedPeerState()
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, ok := d.profiles[stalePeer]; ok {
+		t.Fatal("stale profile entry was not pruned")
+	}
+	if _, ok := d.profiles[freshPeer]; !ok {
+		t.Fatal("fresh profile entry was incorrectly pruned")
+	}
+	if _, ok := d.rates[staleRatePeer]; ok {
+		t.Fatal("stale rate window was not pruned")
+	}
+	if _, ok := d.rates[freshRatePeer]; !ok {
+		t.Fatal("fresh rate window was incorrectly pruned")
+	}
+}

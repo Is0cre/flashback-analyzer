@@ -309,6 +309,109 @@ func TestPrivateGroupSharesAcrossTwoIndependentEmbeddedSessions(t *testing.T) {
 	}
 }
 
+// TestDirectMessageDerivesSharedKeySymmetricallyAndRelayNeverSeesPlaintext
+// proves StartDirectMessage needs no invite, password, or prior contact —
+// both sides land on the same channel id and the same ECDH key purely
+// from knowing each other's already-public identity key — and that the
+// relay in between only ever handles ciphertext under an opaque id.
+func TestDirectMessageDerivesSharedKeySymmetricallyAndRelayNeverSeesPlaintext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping full-stack test in -short mode")
+	}
+
+	hub := startRawDaemonPeer(t, []string{"tcp://127.0.0.1:0"})
+	hubKey := hex.EncodeToString(hub.transport.LocalAddr().YggKey)
+	hubAddr := "tcp://" + hub.transport.ListenAddrs()[0]
+
+	aliceSubsystem := NewAt(filepath.Join(t.TempDir(), "alice", "identity.key"))
+	if err := aliceSubsystem.Create("alices-losenord"); err != nil {
+		t.Fatal(err)
+	}
+	alice, err := aliceSubsystem.ConnectEmbedded(EmbeddedOptions{
+		SeedYggdrasilKey: hubKey,
+		BootstrapPeers:   []string{hubAddr},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer alice.Close()
+
+	bobSubsystem := NewAt(filepath.Join(t.TempDir(), "bob", "identity.key"))
+	if err := bobSubsystem.Create("bobs-helt-egna-losenord"); err != nil {
+		t.Fatal(err)
+	}
+	bob, err := bobSubsystem.ConnectEmbedded(EmbeddedOptions{
+		SeedYggdrasilKey: hubKey,
+		BootstrapPeers:   []string{hubAddr},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bob.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	for _, s := range []*Session{alice, bob} {
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			peers, err := s.Peers(ctx)
+			if err == nil && len(peers) == 1 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("a session never federated with the hub")
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	aliceDM, err := alice.StartDirectMessage(bob.PublicKey(), "Bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bob never called StartDirectMessage before this point — no local
+	// row, no cached key — yet must derive the identical channel id from
+	// nothing but Alice's public key, which the incoming envelope carries.
+	bobDM, err := bob.StartDirectMessage(alice.PublicKey(), "Alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aliceDM.ID != bobDM.ID {
+		t.Fatal("alice and bob derived different channel ids for the same pair")
+	}
+
+	if _, err := alice.SendPrivateGroup(ctx, aliceDM.ID, "hej bob"); err != nil {
+		t.Fatalf("alice kunde inte skicka DM: %v", err)
+	}
+
+	select {
+	case env := <-bob.Incoming():
+		msg, ok := bob.DecryptGroupMessage(env)
+		if !ok {
+			t.Fatal("bob kunde inte dekryptera alices DM")
+		}
+		if msg.Content != "hej bob" {
+			t.Fatalf("fel innehåll: %q", msg.Content)
+		}
+	case <-ctx.Done():
+		t.Fatal("bob mottog aldrig alices DM")
+	}
+
+	select {
+	case env := <-hub.sink.push:
+		payload := &proto.ChatPayload{}
+		if err := proto.DecodePayload(env.Payload, payload); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(payload.Content, "hej bob") {
+			t.Fatal("relayen såg klartext — DM:et krypterades inte korrekt på tråden")
+		}
+	default:
+		t.Fatal("relayen fick aldrig pushen")
+	}
+}
+
 // TestEnsureDefaultChannelsResubscribesAfterReconnect pins the actual bug
 // behind "messages don't route": a fresh transport session always starts
 // with zero subscriptions, regardless of what channels are already known

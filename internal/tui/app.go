@@ -204,6 +204,10 @@ type App struct {
 	GandrUnlockGroupID *[32]byte
 	GandrGroupMessages map[[32]byte][]gandr.PrivateGroupMessage
 	GandrRightCursor   int
+	// GandrUserMenu is non-nil while the per-sender action menu (rename,
+	// start a DM, copy public key) is open — opened by clicking a message
+	// or pressing n, and reused for whichever sender it targets.
+	GandrUserMenu *gandrUserMenuState
 	// SeedYggdrasilKey is the well-known first-contact peer dialed
 	// automatically once a chat session comes online, so a new user never
 	// has to learn what a Yggdrasil key even is to end up talking to
@@ -686,6 +690,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		}
+		if a.GandrUserMenu != nil {
+			return a, gandrHandleUserMenuKey(&a, m.String())
+		}
 		if a.Input.Focused() {
 			// A forgotten password must not make the destructive reset
 			// unreachable. Ctrl+X bypasses the password field, but still
@@ -898,24 +905,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.Input.Focus()
 				return a, nil
 			}
-			// Petname shortcut: name whoever spoke most recently in the
-			// current channel, instead of hunting down their hex pubkey
-			// to type into /add by hand. Pre-fills the input with the key
-			// already in place — just type a name and press Enter.
-			if a.CurrentView == ViewGandrChat && a.GandrActiveGroup == nil && len(a.GandrChannels) > 0 {
-				channel := a.GandrChannels[min(a.Cursor, len(a.GandrChannels)-1)]
-				messages := a.GandrMessages[channel.ID]
-				for i := len(messages) - 1; i >= 0; i-- {
-					sender := messages[i].Sender
-					if messages[i].Local || sender == ([32]byte{}) {
+			// User-menu shortcut: open the same menu a click on a message
+			// gives (rename, DM, copy key) for whoever spoke most
+			// recently, instead of hunting down their hex pubkey by hand.
+			if a.CurrentView == ViewGandrChat {
+				msgs, _ := gandrVisibleMessages(a)
+				for i := len(msgs) - 1; i >= 0; i-- {
+					if msgs[i].IsSelf {
 						continue // that's you — nothing to name
 					}
-					a.GandrAddMode = true
-					a.Input.EchoMode = textinput.EchoNormal
-					a.Input.Placeholder = "publik nyckel + namn"
-					a.Input.SetValue(hex.EncodeToString(sender[:]) + " ")
-					a.Input.CursorEnd()
-					a.Input.Focus()
+					a.GandrUserMenu = &gandrUserMenuState{Sender: msgs[i].Sender}
 					break
 				}
 			}
@@ -1135,6 +1134,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return a, nil
 				}
 			}
+			if a.GandrSession != nil && m.X >= sidebarWidth+2 && (a.Width < 100 || m.X < a.Width-30) {
+				msgs, headerLines := gandrVisibleMessages(a)
+				if row := m.Y - gandrSidebarScreenOffset - headerLines; row >= 0 && row < len(msgs) {
+					target := msgs[row]
+					if !target.IsSelf {
+						a.GandrUserMenu = &gandrUserMenuState{Sender: target.Sender}
+						return a, nil
+					}
+				}
+			}
 			if m.Y >= gandrSidebarScreenOffset+len(actions) && a.GandrSession != nil {
 				a.Input.EchoMode = textinput.EchoNormal
 				a.Input.Placeholder = "Meddelande eller /join kanal"
@@ -1148,6 +1157,67 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // gandrHandleSidebarClick dispatches a click on one of the sidebar rows
 // produced by gandrSidebarRows. Kept separate from the MouseMsg case so the
 // (line, action) pairing and its dispatch logic sit next to each other.
+// gandrHandleUserMenuKey processes a keypress while the per-sender action
+// menu (opened by clicking a message, or n on the most recent sender) is
+// open, intercepted ahead of every other keybinding.
+func gandrHandleUserMenuKey(a *App, key string) tea.Cmd {
+	switch key {
+	case "j", "down":
+		a.GandrUserMenu.Cursor = (a.GandrUserMenu.Cursor + 1) % len(gandrUserMenuOptions)
+	case "k", "up":
+		a.GandrUserMenu.Cursor = (a.GandrUserMenu.Cursor - 1 + len(gandrUserMenuOptions)) % len(gandrUserMenuOptions)
+	case "esc", "q":
+		a.GandrUserMenu = nil
+	case "1", "2", "3", "4":
+		return gandrRunUserMenuAction(a, int(key[0]-'1'))
+	case "enter":
+		return gandrRunUserMenuAction(a, a.GandrUserMenu.Cursor)
+	}
+	return nil
+}
+
+// gandrRunUserMenuAction executes the menu row at index for whichever
+// sender the menu was opened on, then always closes the menu — even
+// "avbryt" just falls through to that.
+func gandrRunUserMenuAction(a *App, index int) tea.Cmd {
+	menu := a.GandrUserMenu
+	if menu == nil || index < 0 || index >= len(gandrUserMenuOptions) {
+		return nil
+	}
+	sender := menu.Sender
+	a.GandrUserMenu = nil
+	switch index {
+	case 0: // Byt smeknamn
+		a.GandrAddMode = true
+		a.Input.EchoMode = textinput.EchoNormal
+		a.Input.Placeholder = "publik nyckel + namn"
+		a.Input.SetValue(hex.EncodeToString(sender[:]) + " ")
+		a.Input.CursorEnd()
+		a.Input.Focus()
+	case 1: // Starta privat chatt
+		if a.GandrSession == nil {
+			return nil
+		}
+		return startGandrDM(a.GandrSession, sender, gandrContactName(a.GandrContacts, sender))
+	case 2: // Kopiera publik nyckel
+		copyToClipboard(hex.EncodeToString(sender[:]))
+		a.Status = "E2E-CHATT · publik nyckel kopierad"
+	}
+	return nil
+}
+
+// gandrContactName looks up pubkey's saved petname, if any — used to
+// seed a new DM's local display name instead of leaving it as a bare
+// key fragment when the sender is already a known contact.
+func gandrContactName(contacts []gandr.Contact, pubkey [32]byte) string {
+	for _, contact := range contacts {
+		if contact.Pubkey == pubkey {
+			return contact.Name
+		}
+	}
+	return ""
+}
+
 func gandrHandleSidebarClick(a App, action gandrSidebarAction) (tea.Model, tea.Cmd) {
 	switch action.Kind {
 	case gandrActionSelectChannel:
@@ -1466,6 +1536,9 @@ func (a App) View() string {
 	if a.PaletteOpen {
 		b.WriteString("\n" + renderPalette(a))
 	}
+	if a.GandrUserMenu != nil {
+		b.WriteString("\n" + renderGandrUserMenu(a))
+	}
 	if a.CurrentView == ViewGandr {
 		b.WriteString("\n" + muted.Render("j/k flytta · Enter öppna · / kommando · Esc lämna fält · x radera valv · n radera + skapa nytt · q tillbaka"))
 	} else if a.CurrentView != ViewGandrChat {
@@ -1488,6 +1561,35 @@ var paletteItems = []paletteItem{
 	{Key: "p", Title: "Polishändelser", Hint: "publika händelser och karta"},
 	{Key: "m", Title: "Cache-mesh", Hint: "status och peer-cache"},
 	{Key: "g", Title: "E2E-chatt", Hint: "krypterad chatt · yggdrasil"},
+}
+
+// renderGandrUserMenu shows the action menu for whichever sender it was
+// opened on (see gandrUserMenuState), styled the same as the command
+// palette — a small keyboard-driven modal appended below the chat view.
+func renderGandrUserMenu(a App) string {
+	menu := a.GandrUserMenu
+	width := 42
+	name := fmt.Sprintf("~%x", menu.Sender[:4])
+	for _, contact := range a.GandrContacts {
+		if contact.Pubkey == menu.Sender && contact.Name != "" {
+			name = contact.Name
+			break
+		}
+	}
+	var b strings.Builder
+	b.WriteString(sectionStyle.Render("ANVÄNDARE") + "  " + metadata.Render(name))
+	b.WriteString("\n" + muted.Render(strings.Repeat("─", width-4)))
+	for i, option := range gandrUserMenuOptions {
+		line := fmt.Sprintf("[%d] %s", i+1, option)
+		if i == menu.Cursor {
+			line = selected.Render("› " + line)
+		} else {
+			line = "  " + line
+		}
+		b.WriteString("\n" + line)
+	}
+	b.WriteString("\n\n" + muted.Render("j/k välj · Enter bekräfta · Esc stäng"))
+	return lipgloss.NewStyle().Width(width).Border(lipgloss.DoubleBorder()).BorderForeground(lipgloss.Color("81")).Padding(0, 1).Render(b.String())
 }
 
 func renderPalette(a App) string {
@@ -1701,6 +1803,84 @@ func gandrChatInputBox(a App, width int) string {
 	return muted.Render(truncate("› Enter för att skriva…", width))
 }
 
+// gandrUserMenuState tracks the per-sender action menu opened by
+// clicking a message or pressing n.
+type gandrUserMenuState struct {
+	Sender [32]byte
+	Cursor int
+}
+
+// gandrUserMenuOptions are the menu's rows, in display and Cursor order.
+var gandrUserMenuOptions = []string{"Byt smeknamn", "Starta privat chatt", "Kopiera publik nyckel", "Avbryt"}
+
+// gandrVisibleMessage is one rendered row in the message log: whichever
+// of a channel or an open private group is active. Computed once and
+// shared between rendering and mouse hit-testing so the two can never
+// drift apart — a click always names whichever sender the row actually
+// shows.
+type gandrVisibleMessage struct {
+	Sender  [32]byte
+	IsSelf  bool
+	At      int64
+	Content string
+}
+
+// gandrVisibleMessages returns the currently visible message rows and
+// how many header lines (title/status/separator/banner) precede the
+// first one in the rendered panel — the same slicing renderGandrChat
+// itself applies (last 18 messages), so a screen row can be mapped back
+// to a specific sender.
+func gandrVisibleMessages(a App) (msgs []gandrVisibleMessage, headerLines int) {
+	if a.GandrActiveGroup != nil {
+		headerLines = 2
+		raw := a.GandrGroupMessages[*a.GandrActiveGroup]
+		start := 0
+		if len(raw) > 18 {
+			start = len(raw) - 18
+		}
+		for _, m := range raw[start:] {
+			isSelf := a.GandrSession != nil && m.Sender == a.GandrSession.PublicKey()
+			msgs = append(msgs, gandrVisibleMessage{Sender: m.Sender, IsSelf: isSelf, At: m.At, Content: m.Content})
+		}
+		return msgs, headerLines
+	}
+	if len(a.GandrChannels) == 0 {
+		return nil, 0
+	}
+	headerLines = 3
+	channel := a.GandrChannels[min(a.Cursor, len(a.GandrChannels)-1)]
+	raw := a.GandrMessages[channel.ID]
+	start := 0
+	if len(raw) > 18 {
+		start = len(raw) - 18
+	}
+	for _, m := range raw[start:] {
+		isSelf := m.Local || m.Sender == ([32]byte{})
+		msgs = append(msgs, gandrVisibleMessage{Sender: m.Sender, IsSelf: isSelf, At: m.At, Content: m.Content})
+	}
+	return msgs, headerLines
+}
+
+// writeGandrMessageRows renders the currently visible messages (see
+// gandrVisibleMessages), marking whichever sender the user menu is
+// currently open for, if any.
+func writeGandrMessageRows(main *strings.Builder, a App) {
+	msgs, _ := gandrVisibleMessages(a)
+	for _, message := range msgs {
+		sender := fmt.Sprintf("~%x", message.Sender[:4])
+		if message.IsSelf {
+			sender = "du"
+		}
+		style := gandrSenderStyle(message.Sender, message.IsSelf)
+		stamp := time.Unix(0, message.At).Local().Format("15:04")
+		marker := " "
+		if a.GandrUserMenu != nil && !message.IsSelf && message.Sender == a.GandrUserMenu.Sender {
+			marker = selected.Render("▸")
+		}
+		main.WriteString(marker + metadata.Render(stamp) + " " + style.Render(fmt.Sprintf("%-8s", sender)) + " " + message.Content + "\n")
+	}
+}
+
 func renderGandrChat(a App) string {
 	width := a.Width
 	if width < 60 {
@@ -1728,28 +1908,10 @@ func renderGandrChat(a App) string {
 		main.WriteString(sectionStyle.Render("🔒 " + groupName))
 		main.WriteString("  " + online.Render("● E2E-KRYPTERAD"))
 		main.WriteString("\n" + metadata.Render(strings.Repeat("─", max(1, mainWidth-2))) + "\n")
-		messages := a.GandrGroupMessages[*a.GandrActiveGroup]
-		if len(messages) == 0 {
+		if len(a.GandrGroupMessages[*a.GandrActiveGroup]) == 0 {
 			main.WriteString(muted.Render(fmt.Sprintf("Välkommen till %s. Inga meddelanden ännu.", groupName)))
 		} else {
-			start := 0
-			if len(messages) > 18 {
-				start = len(messages) - 18
-			}
-			for _, message := range messages[start:] {
-				// Private group messages always carry a real sender
-				// pubkey, even your own — unlike public channel messages
-				// there's no all-zero "this is you" sentinel, so this has
-				// to compare against the session's actual identity.
-				isSelf := a.GandrSession != nil && message.Sender == a.GandrSession.PublicKey()
-				sender := fmt.Sprintf("~%x", message.Sender[:4])
-				if isSelf {
-					sender = "du"
-				}
-				style := gandrSenderStyle(message.Sender, isSelf)
-				stamp := time.Unix(0, message.At).Local().Format("15:04")
-				main.WriteString(metadata.Render(stamp) + " " + style.Render(fmt.Sprintf("%-8s", sender)) + " " + message.Content + "\n")
-			}
+			writeGandrMessageRows(&main, a)
 		}
 	} else if len(a.GandrChannels) == 0 {
 		main.WriteString(sectionStyle.Render("MEDDELANDEN"))
@@ -1775,25 +1937,11 @@ func renderGandrChat(a App) string {
 			main.WriteString("  " + warning.Render("○ LOKAL"))
 		}
 		main.WriteString("\n" + metadata.Render(strings.Repeat("─", max(1, mainWidth-2))) + "\n")
-		main.WriteString(online.Render(fmt.Sprintf("Välkommen till #%s — meddelanden är krypterade och routas via Yggdrasil. Tryck n för att döpa den senaste avsändaren.", channel.Name)) + "\n")
-		messages := a.GandrMessages[channel.ID]
-		if len(messages) == 0 {
+		main.WriteString(online.Render(fmt.Sprintf("Välkommen till #%s — meddelanden är krypterade och routas via Yggdrasil. Klicka eller tryck n på en avsändare för fler val.", channel.Name)) + "\n")
+		if len(a.GandrMessages[channel.ID]) == 0 {
 			main.WriteString(muted.Render("Inga meddelanden ännu."))
 		} else {
-			start := 0
-			if len(messages) > 18 {
-				start = len(messages) - 18
-			}
-			for _, message := range messages[start:] {
-				isSelf := message.Local || message.Sender == ([32]byte{})
-				sender := fmt.Sprintf("~%x", message.Sender[:4])
-				if isSelf {
-					sender = "du"
-				}
-				style := gandrSenderStyle(message.Sender, isSelf)
-				stamp := time.Unix(0, message.At).Local().Format("15:04")
-				main.WriteString(metadata.Render(stamp) + " " + style.Render(fmt.Sprintf("%-8s", sender)) + " " + message.Content + "\n")
-			}
+			writeGandrMessageRows(&main, a)
 		}
 	}
 	main.WriteString("\n" + gandrChatInputBox(a, mainWidth-2))
@@ -2958,6 +3106,22 @@ func openGandrGroup(session *gandr.Session, id [32]byte) tea.Cmd {
 		messages, err := session.PrivateGroupMessages(id, 200)
 		groups, _ := session.PrivateGroups()
 		return gandrGroupMsg{groups: groups, active: &id, messages: messages, err: err}
+	}
+}
+
+// startGandrDM opens (or resumes) a private 1:1 conversation with
+// pubkey, reached via the user menu on any sender in a channel — no
+// invite or password needed, since the two identities alone derive a
+// shared key. See Session.StartDirectMessage.
+func startGandrDM(session *gandr.Session, pubkey [32]byte, name string) tea.Cmd {
+	return func() tea.Msg {
+		group, err := session.StartDirectMessage(pubkey, name)
+		if err != nil {
+			return gandrGroupMsg{err: err}
+		}
+		messages, err := session.PrivateGroupMessages(group.ID, 200)
+		groups, _ := session.PrivateGroups()
+		return gandrGroupMsg{groups: groups, active: &group.ID, messages: messages, err: err}
 	}
 }
 

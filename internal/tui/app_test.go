@@ -617,7 +617,7 @@ func TestGandrSenderStyleIsStableAndSelfIsDistinct(t *testing.T) {
 	}
 }
 
-func TestPressingNPrefillsAddContactWithLastSpeakersKey(t *testing.T) {
+func TestPressingNOpensUserMenuForLastSpeakerAndRenameOptionPrefillsAddContact(t *testing.T) {
 	var sender [32]byte
 	sender[0] = 0xAB
 	sender[1] = 0xCD
@@ -636,8 +636,14 @@ func TestPressingNPrefillsAddContactWithLastSpeakersKey(t *testing.T) {
 
 	updated, _ := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
 	got := updated.(App)
+	if got.GandrUserMenu == nil || got.GandrUserMenu.Sender != sender {
+		t.Fatal("n-genvägen öppnade inte användarmenyn för den senaste avsändaren")
+	}
+
+	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+	got = updated.(App)
 	if !got.GandrAddMode {
-		t.Fatal("n-genvägen aktiverade inte lägg-till-läge")
+		t.Fatal("menyvalet 'Byt smeknamn' aktiverade inte lägg-till-läge")
 	}
 	wantPrefix := hex.EncodeToString(sender[:]) + " "
 	if got.Input.Value() != wantPrefix {
@@ -645,6 +651,84 @@ func TestPressingNPrefillsAddContactWithLastSpeakersKey(t *testing.T) {
 	}
 	if !got.Input.Focused() {
 		t.Fatal("inmatningsfältet fokuserades inte")
+	}
+	if got.GandrUserMenu != nil {
+		t.Fatal("menyn stängdes inte efter valet")
+	}
+}
+
+func TestClickingAMessageOpensUserMenuForThatSender(t *testing.T) {
+	var sender [32]byte
+	sender[0] = 0xEF
+	channel := gandr.Channel{Name: "general"}
+	channel.ID = gandr.ChannelID("general")
+
+	subsystem := gandr.NewAt(filepath.Join(t.TempDir(), "gandr", "identity.key"))
+	if err := subsystem.Create("password"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := subsystem.ConnectEmbedded(gandr.EmbeddedOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	a := New(nil, nil)
+	a.CurrentView = ViewGandrChat
+	a.Width = 80
+	a.GandrSession = session
+	a.GandrChannels = []gandr.Channel{channel}
+	a.GandrMessages = map[[32]byte][]gandr.Message{
+		channel.ID: {
+			{Sender: [32]byte{}, Content: "mitt eget meddelande", Local: true},
+			{Sender: sender, Content: "hej där"},
+		},
+	}
+
+	// Row 0 (Y=7) is the self message — clicking it must not open a menu
+	// naming yourself.
+	updated, _ := a.Update(tea.MouseMsg{X: 30, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	got := updated.(App)
+	if got.GandrUserMenu != nil {
+		t.Fatal("klick på ett eget meddelande öppnade en användarmeny")
+	}
+
+	// Row 1 (Y=8) is the other sender's message.
+	updated, _ = got.Update(tea.MouseMsg{X: 30, Y: 8, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	got = updated.(App)
+	if got.GandrUserMenu == nil || got.GandrUserMenu.Sender != sender {
+		t.Fatal("klick på meddelandet öppnade inte menyn för rätt avsändare")
+	}
+}
+
+func TestUserMenuCopyPublicKeyOptionClosesMenuWithoutTouchingInput(t *testing.T) {
+	var sender [32]byte
+	sender[0] = 0x11
+	a := New(nil, nil)
+	a.CurrentView = ViewGandrChat
+	a.GandrUserMenu = &gandrUserMenuState{Sender: sender, Cursor: 2}
+
+	updated, _ := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := updated.(App)
+	if got.GandrUserMenu != nil {
+		t.Fatal("menyn stängdes inte efter 'kopiera publik nyckel'")
+	}
+	if got.GandrAddMode {
+		t.Fatal("kopiera publik nyckel skulle inte aktivera lägg-till-läge")
+	}
+}
+
+func TestUserMenuEscCancelsWithoutSideEffects(t *testing.T) {
+	var sender [32]byte
+	sender[0] = 0x22
+	a := New(nil, nil)
+	a.CurrentView = ViewGandrChat
+	a.GandrUserMenu = &gandrUserMenuState{Sender: sender}
+
+	updated, _ := a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got := updated.(App)
+	if got.GandrUserMenu != nil {
+		t.Fatal("esc stängde inte användarmenyn")
 	}
 }
 

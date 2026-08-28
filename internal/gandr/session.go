@@ -1,7 +1,9 @@
 package gandr
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -389,6 +391,73 @@ func (s *Session) subscribeGroup(id [32]byte) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = s.client.Subscribe(ctx, id)
+}
+
+// dmGroupID derives a stable channel id for a 1:1 conversation between
+// two identities. Sorting the pair before hashing means both sides land
+// on the same id regardless of who starts the conversation.
+func dmGroupID(a, b [32]byte) [32]byte {
+	first, second := a, b
+	if bytes.Compare(first[:], second[:]) > 0 {
+		first, second = second, first
+	}
+	h := sha256.New()
+	h.Write([]byte("gandr-dm-id-v1:"))
+	h.Write(first[:])
+	h.Write(second[:])
+	var id [32]byte
+	copy(id[:], h.Sum(nil))
+	return id
+}
+
+// StartDirectMessage opens (creating locally on first use) a private 1:1
+// conversation with peerPubkey, stored and sent exactly like a private
+// group of two. Unlike CreatePrivateGroup no password ever changes
+// hands: the message key is a genuine X25519 ECDH shared secret between
+// the two identities, so both sides derive the same key from nothing but
+// already-public information, and — unlike a password-derived group key
+// — nobody who merely observes both public keys (including any relay)
+// can derive it too.
+func (s *Session) StartDirectMessage(peerPubkey [32]byte, peerName string) (PrivateGroup, error) {
+	if s == nil || s.db == nil || s.id == nil {
+		return PrivateGroup{}, errors.New("E2E-CHATT-sessionen är inte aktiv")
+	}
+	id := dmGroupID(s.PublicKey(), peerPubkey)
+	if _, unlocked := s.groups[id]; !unlocked {
+		myX, err := gandrcrypto.PrivateKeyToX25519(s.id.PrivateKey)
+		if err != nil {
+			return PrivateGroup{}, err
+		}
+		theirX, err := gandrcrypto.PublicKeyToX25519(ed25519.PublicKey(peerPubkey[:]))
+		if err != nil {
+			return PrivateGroup{}, err
+		}
+		key, err := gandrcrypto.DeriveSharedKey(myX, theirX, "gandr-dm-v1")
+		if err != nil {
+			return PrivateGroup{}, err
+		}
+		s.groups[id] = key
+	}
+	name := strings.TrimSpace(peerName)
+	if name == "" {
+		name = fmt.Sprintf("~%x", peerPubkey[:4])
+	}
+	existing, err := s.db.ListPrivateGroups()
+	if err != nil {
+		return PrivateGroup{}, err
+	}
+	for _, g := range existing {
+		if g.ID == id {
+			s.subscribeGroup(id)
+			return PrivateGroup{ID: g.ID, Name: g.Name, CreatedAt: g.CreatedAt}, nil
+		}
+	}
+	created := time.Now().UnixNano()
+	if err := s.db.SavePrivateGroup(gandrclientdb.PrivateGroup{ID: id, Name: name, CreatedAt: created}); err != nil {
+		return PrivateGroup{}, err
+	}
+	s.subscribeGroup(id)
+	return PrivateGroup{ID: id, Name: name, CreatedAt: created}, nil
 }
 
 func (s *Session) PrivateGroups() ([]PrivateGroup, error) {

@@ -2139,6 +2139,16 @@ func renderGandrChat(a App) string {
 				}
 			}
 		}
+		if unknown := gandrUnknownOnlinePeers(a.GandrPeers, a.GandrContacts); len(unknown) > 0 {
+			// Presence for someone not yet named is still worth showing —
+			// otherwise "who's actually here" is invisible for every peer
+			// until the moment they're added, when the peer count above
+			// already proved someone real is reachable.
+			members.WriteString("\n" + sectionStyle.Render("OKÄNDA") + "\n")
+			for _, peer := range unknown {
+				members.WriteString(online.Render("● ~"+fmt.Sprintf("%x", peer[:4])) + "\n")
+			}
+		}
 		members.WriteString("\n" + muted.Render("a lägg till · x blockera"))
 		memberView := gandrPanel(members.String(), memberWidth)
 		return viewHeading("BACKFLASH E2E-CHATT · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView, memberView) + "\n\n" + muted.Render("j/k kanal · ↑/↓ användare · pgup/pgdown scrolla · Enter skriv · a lägg till · /invite · /connect ·"+gandrGroupHint(a)+" x blockera · q tillbaka")
@@ -2151,6 +2161,27 @@ func gandrPanel(content string, width int) string {
 		return content
 	}
 	return lipgloss.NewStyle().Width(width).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("238")).Padding(0, 1).Render(content)
+}
+
+// gandrUnknownOnlinePeers returns the identities in peers that don't
+// match any saved contact — real presence for people who haven't been
+// named yet, instead of only the total peer count saying "someone's
+// there" with no way to tell who.
+func gandrUnknownOnlinePeers(peers []gandr.Peer, contacts []gandr.Contact) [][32]byte {
+	var out [][32]byte
+	for _, peer := range peers {
+		known := false
+		for _, contact := range contacts {
+			if contact.Pubkey == peer.Identity {
+				known = true
+				break
+			}
+		}
+		if !known {
+			out = append(out, peer.Identity)
+		}
+	}
+	return out
 }
 
 func gandrPeerOnline(peers []gandr.Peer, identity [32]byte) bool {

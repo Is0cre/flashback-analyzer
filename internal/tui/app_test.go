@@ -634,6 +634,28 @@ func TestTypingPasswordAfterClickingLockedGroupUnlocksIt(t *testing.T) {
 	}
 }
 
+func TestGandrChatShowsPresenceForOnlinePeersWithNoSavedName(t *testing.T) {
+	var knownID [32]byte
+	knownID[0] = 0x10
+	var strangerID [32]byte
+	strangerID[0] = 0xAB
+	strangerID[1] = 0xCD
+
+	a := New(nil, nil)
+	a.CurrentView = ViewGandrChat
+	a.Width = 120
+	a.GandrContacts = []gandr.Contact{{Pubkey: knownID, Name: "känd vän"}}
+	a.GandrPeers = []gandr.Peer{{Identity: knownID}, {Identity: strangerID}}
+
+	view := a.View()
+	if !strings.Contains(view, "OKÄNDA") {
+		t.Fatalf("vyn saknar OKÄNDA-sektionen för en online-peer utan sparat namn: %q", view)
+	}
+	if !strings.Contains(view, hex.EncodeToString(strangerID[:4])) {
+		t.Fatalf("vyn visar inte fingeravtrycket för den okända peern: %q", view)
+	}
+}
+
 func TestGandrChatShowsUsersAndMeshPresence(t *testing.T) {
 	var onlineID [32]byte
 	onlineID[0] = 0x42

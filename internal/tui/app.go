@@ -1868,6 +1868,9 @@ func writeGandrMessageRows(main *strings.Builder, a App) {
 	msgs, _ := gandrVisibleMessages(a)
 	for _, message := range msgs {
 		sender := fmt.Sprintf("~%x", message.Sender[:4])
+		if name := gandrContactName(a.GandrContacts, message.Sender); name != "" {
+			sender = name
+		}
 		if message.IsSelf {
 			sender = "du"
 		}

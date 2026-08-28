@@ -548,6 +548,30 @@ func TestGandrChatShowsUsersAndMeshPresence(t *testing.T) {
 	}
 }
 
+func TestGandrChatMessageLogShowsSavedPetnameNotRawHex(t *testing.T) {
+	var sender [32]byte
+	sender[0] = 0x42
+	channel := gandr.Channel{Name: "general"}
+	channel.ID = gandr.ChannelID("general")
+
+	a := New(nil, nil)
+	a.CurrentView = ViewGandrChat
+	a.Width = 120
+	a.GandrChannels = []gandr.Channel{channel}
+	a.GandrContacts = []gandr.Contact{{Pubkey: sender, Name: "gröna katten"}}
+	a.GandrMessages = map[[32]byte][]gandr.Message{
+		channel.ID: {{Sender: sender, Content: "hej"}},
+	}
+
+	view := a.View()
+	if !strings.Contains(view, "gröna katten") {
+		t.Fatalf("meddelandeloggen visade inte det sparade smeknamnet: %q", view)
+	}
+	if strings.Contains(view, hex.EncodeToString(sender[:4])) {
+		t.Fatalf("meddelandeloggen visade rå hex trots sparat smeknamn: %q", view)
+	}
+}
+
 func TestGandrChatShowsWelcomeBannerAndPersistentInputBox(t *testing.T) {
 	a := New(nil, nil)
 	a.CurrentView = ViewGandrChat

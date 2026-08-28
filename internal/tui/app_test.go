@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -660,6 +661,63 @@ func TestGandrChatShowsPeerCountNotJustAGreenDot(t *testing.T) {
 	view = a.View()
 	if !strings.Contains(view, "NÄTVERK · 1 peer") {
 		t.Fatalf("visade inte peer-antalet när en peer finns: %q", view)
+	}
+}
+
+func TestGandrMessageWindowAnchorsToAFixedPointAsNewMessagesArrive(t *testing.T) {
+	// Scrolled back 5 from a 20-message history: window should be
+	// [start=20-5-18=-3->0, end=15) i.e. the oldest 15 messages.
+	start, end, scrolled := gandrMessageWindow(20, 5)
+	if start != 0 || end != 15 || !scrolled {
+		t.Fatalf("got start=%d end=%d scrolled=%v, want 0,15,true", start, end, scrolled)
+	}
+	// Two more messages arrive (total 22) with the same scrollBack: the
+	// window should still end 5 messages before the new live end (17),
+	// i.e. still showing the same messages the user was looking at, not
+	// jumping to show two different, newer ones.
+	start, end, scrolled = gandrMessageWindow(22, 5)
+	if start != 0 || end != 17 || !scrolled {
+		t.Fatalf("got start=%d end=%d scrolled=%v, want 0,17,true", start, end, scrolled)
+	}
+}
+
+func TestGandrMessageWindowPinnedToLiveEndByDefault(t *testing.T) {
+	start, end, scrolled := gandrMessageWindow(30, 0)
+	if start != 12 || end != 30 || scrolled {
+		t.Fatalf("got start=%d end=%d scrolled=%v, want 12,30,false", start, end, scrolled)
+	}
+}
+
+func TestGandrMessageWindowClampsScrollBackToHistoryLength(t *testing.T) {
+	start, end, scrolled := gandrMessageWindow(5, 1000)
+	if start != 0 || end != 0 || !scrolled {
+		t.Fatalf("got start=%d end=%d scrolled=%v, want 0,0,true", start, end, scrolled)
+	}
+}
+
+func TestPgupScrollsGandrChatHistoryAndPgdownReturnsToLive(t *testing.T) {
+	channel := gandr.Channel{Name: "general"}
+	channel.ID = gandr.ChannelID("general")
+	var messages []gandr.Message
+	for i := 0; i < 25; i++ {
+		messages = append(messages, gandr.Message{Content: fmt.Sprintf("m%d", i), Local: true})
+	}
+
+	a := New(nil, nil)
+	a.CurrentView = ViewGandrChat
+	a.GandrChannels = []gandr.Channel{channel}
+	a.GandrMessages = map[[32]byte][]gandr.Message{channel.ID: messages}
+
+	updated, _ := a.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	got := updated.(App)
+	if got.GandrScrollBack != gandrScrollPageSize {
+		t.Fatalf("pgup gav GandrScrollBack=%d, want %d", got.GandrScrollBack, gandrScrollPageSize)
+	}
+
+	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	got = updated.(App)
+	if got.GandrScrollBack != 0 {
+		t.Fatalf("pgdown gav GandrScrollBack=%d, want 0", got.GandrScrollBack)
 	}
 }
 

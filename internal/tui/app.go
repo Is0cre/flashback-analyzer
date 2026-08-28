@@ -208,6 +208,11 @@ type App struct {
 	// start a DM, copy public key) is open — opened by clicking a message
 	// or pressing n, and reused for whichever sender it targets.
 	GandrUserMenu *gandrUserMenuState
+	// GandrScrollBack is how many messages back from the live end the
+	// visible window currently starts, in the active channel/group — 0
+	// means pinned to the latest messages, same as before scrolling
+	// existed at all. See gandrVisibleMessages.
+	GandrScrollBack int
 	// SeedYggdrasilKey is the well-known first-contact peer dialed
 	// automatically once a chat session comes online, so a new user never
 	// has to learn what a Yggdrasil key even is to end up talking to
@@ -580,6 +585,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.GandrGroups = m.groups
 			a.GandrActiveGroup = m.active
+			a.GandrScrollBack = 0
 			// m.messages is only populated by the commands that actually
 			// fetch it (skapa/öppna); a nil check here keeps /grupp bjud
 			// (which reuses this same message to report its invite string)
@@ -792,6 +798,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						channel := a.GandrChannels[min(a.Cursor, len(a.GandrChannels)-1)]
 						return a, gandrLeave(a.GandrSession, channel.ID)
 					}
+					a.GandrScrollBack = 0
 					if a.GandrActiveGroup != nil {
 						return a, sendPrivateGandrGroup(a.GandrSession, *a.GandrActiveGroup, q)
 					}
@@ -909,7 +916,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// gives (rename, DM, copy key) for whoever spoke most
 			// recently, instead of hunting down their hex pubkey by hand.
 			if a.CurrentView == ViewGandrChat {
-				msgs, _ := gandrVisibleMessages(a)
+				msgs, _, _ := gandrVisibleMessages(a)
 				for i := len(msgs) - 1; i >= 0; i-- {
 					if msgs[i].IsSelf {
 						continue // that's you — nothing to name
@@ -934,6 +941,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// discoverable without knowing the slash command exists.
 				if a.GandrActiveGroup != nil {
 					a.GandrActiveGroup = nil
+					a.GandrScrollBack = 0
 					a.Status = "E2E-CHATT · lämnade den privata gruppen"
 				}
 				return a, nil
@@ -950,6 +958,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.refreshPostViewport(false)
 				break
 			}
+			if a.CurrentView == ViewGandrChat {
+				a.GandrScrollBack = 0
+			}
 			a.move(1)
 		case "k", "up":
 			if a.CurrentView == ViewReader {
@@ -957,15 +968,26 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.refreshPostViewport(false)
 				break
 			}
+			if a.CurrentView == ViewGandrChat {
+				a.GandrScrollBack = 0
+			}
 			a.move(-1)
 		case "pgdown", "ctrl+d":
 			if a.CurrentView == ViewReader {
 				a.PostViewport, _ = a.PostViewport.Update(m)
 				return a, nil
 			}
+			if a.CurrentView == ViewGandrChat {
+				a.GandrScrollBack = max(0, a.GandrScrollBack-gandrScrollPageSize)
+				return a, nil
+			}
 		case "pgup", "ctrl+u":
 			if a.CurrentView == ViewReader {
 				a.PostViewport, _ = a.PostViewport.Update(m)
+				return a, nil
+			}
+			if a.CurrentView == ViewGandrChat {
+				a.GandrScrollBack += gandrScrollPageSize
 				return a, nil
 			}
 		case "x":
@@ -1135,7 +1157,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			if a.GandrSession != nil && m.X >= sidebarWidth+2 && (a.Width < 100 || m.X < a.Width-30) {
-				msgs, headerLines := gandrVisibleMessages(a)
+				msgs, headerLines, _ := gandrVisibleMessages(a)
 				if row := m.Y - gandrSidebarScreenOffset - headerLines; row >= 0 && row < len(msgs) {
 					target := msgs[row]
 					if !target.IsSelf {
@@ -1222,6 +1244,7 @@ func gandrHandleSidebarClick(a App, action gandrSidebarAction) (tea.Model, tea.C
 	switch action.Kind {
 	case gandrActionSelectChannel:
 		a.Cursor = action.Index
+		a.GandrScrollBack = 0
 	case gandrActionJoinChannel:
 		if a.GandrSession != nil {
 			a.Input.SetValue("/join ")
@@ -1884,42 +1907,63 @@ type gandrVisibleMessage struct {
 // first one in the rendered panel — the same slicing renderGandrChat
 // itself applies (last 18 messages), so a screen row can be mapped back
 // to a specific sender.
-func gandrVisibleMessages(a App) (msgs []gandrVisibleMessage, headerLines int) {
+// gandrVisibleWindowSize is how many messages the panel shows at once.
+const gandrVisibleWindowSize = 18
+
+// gandrScrollPageSize is how many messages pgup/pgdown step by.
+const gandrScrollPageSize = 10
+
+// gandrMessageWindow computes [start, end) into a total-length message
+// slice for a window ending scrollBack messages before the live end —
+// scrollBack 0 is always pinned to the most recent gandrVisibleWindowSize
+// messages, however many arrive later, which is what lets a fixed
+// scrollBack value keep pointing at the same messages as new ones append
+// (see GandrScrollBack's doc comment).
+func gandrMessageWindow(total, scrollBack int) (start, end int, scrolled bool) {
+	if scrollBack < 0 {
+		scrollBack = 0
+	}
+	if scrollBack > total {
+		scrollBack = total
+	}
+	end = total - scrollBack
+	start = end - gandrVisibleWindowSize
+	if start < 0 {
+		start = 0
+	}
+	return start, end, end < total
+}
+
+func gandrVisibleMessages(a App) (msgs []gandrVisibleMessage, headerLines int, scrolled bool) {
 	if a.GandrActiveGroup != nil {
 		headerLines = 2
 		raw := a.GandrGroupMessages[*a.GandrActiveGroup]
-		start := 0
-		if len(raw) > 18 {
-			start = len(raw) - 18
-		}
-		for _, m := range raw[start:] {
+		start, end, sc := gandrMessageWindow(len(raw), a.GandrScrollBack)
+		for _, m := range raw[start:end] {
 			isSelf := a.GandrSession != nil && m.Sender == a.GandrSession.PublicKey()
 			msgs = append(msgs, gandrVisibleMessage{Sender: m.Sender, IsSelf: isSelf, At: m.At, Content: m.Content})
 		}
-		return msgs, headerLines
+		return msgs, headerLines, sc
 	}
 	if len(a.GandrChannels) == 0 {
-		return nil, 0
+		return nil, 0, false
 	}
 	headerLines = 3
 	channel := a.GandrChannels[min(a.Cursor, len(a.GandrChannels)-1)]
 	raw := a.GandrMessages[channel.ID]
-	start := 0
-	if len(raw) > 18 {
-		start = len(raw) - 18
-	}
-	for _, m := range raw[start:] {
+	start, end, sc := gandrMessageWindow(len(raw), a.GandrScrollBack)
+	for _, m := range raw[start:end] {
 		isSelf := m.Local || m.Sender == ([32]byte{})
 		msgs = append(msgs, gandrVisibleMessage{Sender: m.Sender, IsSelf: isSelf, At: m.At, Content: m.Content})
 	}
-	return msgs, headerLines
+	return msgs, headerLines, sc
 }
 
 // writeGandrMessageRows renders the currently visible messages (see
 // gandrVisibleMessages), marking whichever sender the user menu is
 // currently open for, if any.
 func writeGandrMessageRows(main *strings.Builder, a App) {
-	msgs, _ := gandrVisibleMessages(a)
+	msgs, _, _ := gandrVisibleMessages(a)
 	for _, message := range msgs {
 		sender := fmt.Sprintf("~%x", message.Sender[:4])
 		if name := gandrContactName(a.GandrContacts, message.Sender); name != "" {
@@ -1964,6 +2008,9 @@ func renderGandrChat(a App) string {
 		}
 		main.WriteString(sectionStyle.Render("🔒 " + groupName))
 		main.WriteString("  " + online.Render("● E2E-KRYPTERAD"))
+		if a.GandrScrollBack > 0 {
+			main.WriteString("  " + warning.Render("↑ äldre · pgdown = ikapp"))
+		}
 		main.WriteString("\n" + metadata.Render(strings.Repeat("─", max(1, mainWidth-2))) + "\n")
 		if len(a.GandrGroupMessages[*a.GandrActiveGroup]) == 0 {
 			main.WriteString(muted.Render(fmt.Sprintf("Välkommen till %s. Inga meddelanden ännu.", groupName)))
@@ -1992,6 +2039,9 @@ func renderGandrChat(a App) string {
 			}
 		} else {
 			main.WriteString("  " + warning.Render("○ LOKAL"))
+		}
+		if a.GandrScrollBack > 0 {
+			main.WriteString("  " + warning.Render("↑ äldre · pgdown = ikapp"))
 		}
 		main.WriteString("\n" + metadata.Render(strings.Repeat("─", max(1, mainWidth-2))) + "\n")
 		main.WriteString(online.Render(fmt.Sprintf("Välkommen till #%s — meddelanden är krypterade och routas via Yggdrasil. Klicka eller tryck n på en avsändare för fler val.", channel.Name)) + "\n")
@@ -2044,9 +2094,9 @@ func renderGandrChat(a App) string {
 		}
 		members.WriteString("\n" + muted.Render("a lägg till · x blockera"))
 		memberView := gandrPanel(members.String(), memberWidth)
-		return viewHeading("BACKFLASH E2E-CHATT · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView, memberView) + "\n\n" + muted.Render("j/k kanal · ↑/↓ användare · Enter skriv · a lägg till · /invite · /connect ·"+gandrGroupHint(a)+" x blockera · q tillbaka")
+		return viewHeading("BACKFLASH E2E-CHATT · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView, memberView) + "\n\n" + muted.Render("j/k kanal · ↑/↓ användare · pgup/pgdown scrolla · Enter skriv · a lägg till · /invite · /connect ·"+gandrGroupHint(a)+" x blockera · q tillbaka")
 	}
-	return viewHeading("BACKFLASH E2E-CHATT · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView) + "\n\n" + muted.Render("j/k kanal · Enter skriv · /invite · /connect ·"+gandrGroupHint(a)+" q tillbaka")
+	return viewHeading("BACKFLASH E2E-CHATT · IRC", "PRIVAT NÄTVERK") + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, mainView) + "\n\n" + muted.Render("j/k kanal · pgup/pgdown scrolla · Enter skriv · /invite · /connect ·"+gandrGroupHint(a)+" q tillbaka")
 }
 
 func gandrPanel(content string, width int) string {

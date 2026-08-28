@@ -213,6 +213,12 @@ type App struct {
 	// means pinned to the latest messages, same as before scrolling
 	// existed at all. See gandrVisibleMessages.
 	GandrScrollBack int
+	// GandrReadCounts is, per channel or group id, how many of its
+	// messages have been seen — the sidebar's unread badge is just
+	// len(messages)-GandrReadCounts[id]. In-memory only: unread state
+	// resets on restart rather than needing a new persisted column, which
+	// is an acceptable trade for how low-stakes getting this wrong is.
+	GandrReadCounts map[[32]byte]int
 	// SeedYggdrasilKey is the well-known first-contact peer dialed
 	// automatically once a chat session comes online, so a new user never
 	// has to learn what a Yggdrasil key even is to end up talking to
@@ -497,6 +503,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 		}
+		// Loaded history isn't "unread" — only messages that arrive after
+		// this point while a channel isn't the one on screen should be.
+		a.GandrReadCounts = make(map[[32]byte]int)
+		for _, channel := range m.channels {
+			gandrMarkChannelRead(&a, channel.ID)
+		}
 		if m.offline {
 			// "starta gandrd separat" was correct advice for the old
 			// architecture — irrelevant now that chat runs its own daemon
@@ -536,6 +548,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.message.Local {
 			playSound(soundIncomingMessage)
 		}
+		// Never show an unread badge for the channel currently on screen
+		// — the message just appeared in the transcript being looked at.
+		if a.CurrentView == ViewGandrChat && a.GandrActiveGroup == nil &&
+			a.Cursor < len(a.GandrChannels) && a.GandrChannels[a.Cursor].ID == m.message.ChannelID {
+			gandrMarkChannelRead(&a, m.message.ChannelID)
+		}
 		if a.GandrSession != nil {
 			return a, waitGandrIncoming(a.GandrSession)
 		}
@@ -549,6 +567,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.GandrGroupMessages[m.message.GroupID] = append(a.GandrGroupMessages[m.message.GroupID], m.message)
 		if a.GandrSession == nil || m.message.Sender != a.GandrSession.PublicKey() {
 			playSound(soundIncomingMessage)
+		}
+		if a.CurrentView == ViewGandrChat && a.GandrActiveGroup != nil && *a.GandrActiveGroup == m.message.GroupID {
+			gandrMarkGroupRead(&a, m.message.GroupID)
 		}
 		if a.GandrSession != nil {
 			return a, waitGandrIncoming(a.GandrSession)
@@ -595,6 +616,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.GandrGroupMessages = make(map[[32]byte][]gandr.PrivateGroupMessage)
 				}
 				a.GandrGroupMessages[*m.active] = m.messages
+			}
+			if m.active != nil {
+				gandrMarkGroupRead(&a, *m.active)
 			}
 			if m.invite != "" {
 				a.Status = "E2E-CHATT · inbjudan (delas som lösenordet, inte publikt): " + m.invite
@@ -960,6 +984,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if a.CurrentView == ViewGandrChat {
 				a.GandrScrollBack = 0
+				a.move(1)
+				if a.GandrActiveGroup == nil && a.Cursor < len(a.GandrChannels) {
+					gandrMarkChannelRead(&a, a.GandrChannels[a.Cursor].ID)
+				}
+				break
 			}
 			a.move(1)
 		case "k", "up":
@@ -970,6 +999,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if a.CurrentView == ViewGandrChat {
 				a.GandrScrollBack = 0
+				a.move(-1)
+				if a.GandrActiveGroup == nil && a.Cursor < len(a.GandrChannels) {
+					gandrMarkChannelRead(&a, a.GandrChannels[a.Cursor].ID)
+				}
+				break
 			}
 			a.move(-1)
 		case "pgdown", "ctrl+d":
@@ -1245,6 +1279,9 @@ func gandrHandleSidebarClick(a App, action gandrSidebarAction) (tea.Model, tea.C
 	case gandrActionSelectChannel:
 		a.Cursor = action.Index
 		a.GandrScrollBack = 0
+		if action.Index >= 0 && action.Index < len(a.GandrChannels) {
+			gandrMarkChannelRead(&a, a.GandrChannels[action.Index].ID)
+		}
 	case gandrActionJoinChannel:
 		if a.GandrSession != nil {
 			a.Input.SetValue("/join ")
@@ -1757,9 +1794,12 @@ func gandrSidebarRows(a App, sidebarWidth int) ([]string, []gandrSidebarAction) 
 		actions = append(actions, gandrSidebarAction{})
 	} else {
 		for i, channel := range a.GandrChannels {
+			active := i == a.Cursor && a.GandrActiveGroup == nil
 			line := "# " + truncate(channel.Name, sidebarWidth-4)
-			if i == a.Cursor {
+			if active {
 				line = selected.Render("› " + truncate(channel.Name, sidebarWidth-4))
+			} else if unread := gandrUnreadCount(a, channel.ID, len(a.GandrMessages[channel.ID])); unread > 0 {
+				line += " " + accent.Render(fmt.Sprintf("(%d)", unread))
 			}
 			lines = append(lines, line)
 			actions = append(actions, gandrSidebarAction{Kind: gandrActionSelectChannel, Index: i})
@@ -1836,13 +1876,20 @@ func gandrGroupSidebarLine(a App, group gandr.PrivateGroup, sidebarWidth int) st
 	if group.PeerPubkey != nil {
 		marker = "💬"
 	}
+	active := a.GandrActiveGroup != nil && *a.GandrActiveGroup == group.ID
 	switch {
-	case a.GandrActiveGroup != nil && *a.GandrActiveGroup == group.ID:
+	case active:
 		marker = "›"
 	case a.GandrSession != nil && a.GandrSession.IsGroupUnlocked(group.ID):
 		marker = "🔓"
 	}
-	return marker + " " + truncate(group.Name, sidebarWidth-5)
+	line := marker + " " + truncate(group.Name, sidebarWidth-5)
+	if !active {
+		if unread := gandrUnreadCount(a, group.ID, len(a.GandrGroupMessages[group.ID])); unread > 0 {
+			line += " " + accent.Render(fmt.Sprintf("(%d)", unread))
+		}
+	}
+	return line
 }
 
 // gandrSenderPalette assigns each chat participant a stable color derived
@@ -3341,6 +3388,34 @@ func sendPrivateGandrGroup(session *gandr.Session, id [32]byte, content string) 
 		groups, _ := session.PrivateGroups()
 		return gandrGroupMsg{groups: groups, active: &id, messages: messages, err: err}
 	}
+}
+
+// gandrMarkChannelRead records that every message currently held for
+// channel id has been seen, clearing its unread badge.
+func gandrMarkChannelRead(a *App, id [32]byte) {
+	if a.GandrReadCounts == nil {
+		a.GandrReadCounts = make(map[[32]byte]int)
+	}
+	a.GandrReadCounts[id] = len(a.GandrMessages[id])
+}
+
+// gandrMarkGroupRead is gandrMarkChannelRead for a.GandrGroupMessages —
+// private groups and DMs share the same read-count map (channel/group
+// ids never collide across the two, being independent SHA-256 outputs).
+func gandrMarkGroupRead(a *App, id [32]byte) {
+	if a.GandrReadCounts == nil {
+		a.GandrReadCounts = make(map[[32]byte]int)
+	}
+	a.GandrReadCounts[id] = len(a.GandrGroupMessages[id])
+}
+
+// gandrUnreadCount is how many of id's messages (channel or group,
+// tracked in the same map) haven't been marked read yet.
+func gandrUnreadCount(a App, id [32]byte, total int) int {
+	if n := total - a.GandrReadCounts[id]; n > 0 {
+		return n
+	}
+	return 0
 }
 
 func appendGandrMessage(messages map[[32]byte][]gandr.Message, message gandr.Message) {

@@ -248,6 +248,77 @@ func TestGandrSidebarRowsStayAlignedWithClickActions(t *testing.T) {
 	}
 }
 
+func TestGandrSidebarShowsUnreadBadgeOnlyForInactiveChannel(t *testing.T) {
+	general := gandr.Channel{Name: "general"}
+	general.ID = gandr.ChannelID("general")
+	support := gandr.Channel{Name: "support"}
+	support.ID = gandr.ChannelID("support")
+
+	a := New(nil, nil)
+	a.GandrChannels = []gandr.Channel{general, support}
+	a.Cursor = 0 // viewing "general"
+	a.GandrMessages = map[[32]byte][]gandr.Message{
+		general.ID: {{Content: "a"}, {Content: "b"}}, // 2 messages, 0 marked read
+		support.ID: {{Content: "c"}},                  // 1 message, 0 marked read
+	}
+
+	lines, _ := gandrSidebarRows(a, 24)
+	var generalLine, supportLine string
+	for _, line := range lines {
+		if strings.Contains(line, "general") {
+			generalLine = line
+		}
+		if strings.Contains(line, "support") {
+			supportLine = line
+		}
+	}
+	if strings.Contains(generalLine, "(") {
+		t.Fatalf("den aktiva kanalen visade en oläst-badge: %q", generalLine)
+	}
+	if !strings.Contains(supportLine, "(1)") {
+		t.Fatalf("den inaktiva kanalen med olästa meddelanden saknar badge: %q", supportLine)
+	}
+}
+
+func TestGandrMarkChannelReadClearsUnreadBadge(t *testing.T) {
+	var sender [32]byte
+	sender[0] = 0x01
+	channel := gandr.Channel{Name: "general"}
+	channel.ID = gandr.ChannelID("general")
+
+	a := New(nil, nil)
+	a.CurrentView = ViewGandrChat
+	a.GandrChannels = []gandr.Channel{channel}
+	a.GandrMessages = map[[32]byte][]gandr.Message{
+		channel.ID: {{Sender: sender, Content: "hej"}},
+	}
+	if got := gandrUnreadCount(a, channel.ID, len(a.GandrMessages[channel.ID])); got != 1 {
+		t.Fatalf("förväntade 1 oläst innan markering, fick %d", got)
+	}
+	gandrMarkChannelRead(&a, channel.ID)
+	if got := gandrUnreadCount(a, channel.ID, len(a.GandrMessages[channel.ID])); got != 0 {
+		t.Fatalf("förväntade 0 olästa efter markering, fick %d", got)
+	}
+}
+
+func TestIncomingMessageForActiveChannelNeverShowsUnread(t *testing.T) {
+	var sender [32]byte
+	sender[0] = 0x02
+	channel := gandr.Channel{Name: "general"}
+	channel.ID = gandr.ChannelID("general")
+
+	a := New(nil, nil)
+	a.CurrentView = ViewGandrChat
+	a.GandrChannels = []gandr.Channel{channel}
+	a.Cursor = 0
+
+	updated, _ := a.Update(gandrIncomingMsg{message: gandr.Message{ChannelID: channel.ID, Sender: sender, Content: "hej"}})
+	got := updated.(App)
+	if unread := gandrUnreadCount(got, channel.ID, len(got.GandrMessages[channel.ID])); unread != 0 {
+		t.Fatalf("ett meddelande i den aktiva kanalen räknades som oläst: %d", unread)
+	}
+}
+
 func TestGandrSidebarSeparatesDMsFromRealGroups(t *testing.T) {
 	var peer [32]byte
 	peer[0] = 0x11

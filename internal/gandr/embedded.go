@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -146,6 +147,12 @@ func newEmbeddedClient(id *gandridentity.Identity, dataDir string, opts Embedded
 		MaxPayloadSize: 65535,
 		RateLimitRPM:   600,
 		Seeds:          seeds,
+		// BACKFLASH_GANDR_DEBUG is the client-side twin of gandrd's own
+		// opt-in debug logger (see src/gandr/pkg/daemon's Options.Debug
+		// doc) — temporary, diagnosing the seed-connect path, off by
+		// default. main.go redirects the global logger to a file when
+		// this is set, since the TUI owns the terminal.
+		Debug: os.Getenv("BACKFLASH_GANDR_DEBUG") != "",
 	}, id, transport, objects)
 	if err != nil {
 		_ = transport.Close()

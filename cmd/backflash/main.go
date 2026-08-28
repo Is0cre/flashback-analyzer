@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 
@@ -37,6 +39,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer s.Close()
+	if os.Getenv("BACKFLASH_GANDR_DEBUG") != "" {
+		logPath := filepath.Join(filepath.Dir(paths.Database), "gandr-debug.log")
+		if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+			log.SetOutput(f)
+			defer f.Close()
+		}
+	}
 	c := flashback.NewClient(flashback.AnonymousSession{})
 	appDone := diagnostics.Start("app construction")
 	model := tui.New(s, c)
